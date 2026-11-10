@@ -12,6 +12,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import com.solid.callrecorder.R
+import com.solid.callrecorder.recorder.ShizukuEnhancedRecorder
 import com.solid.callrecorder.service.CallRecorderService
 
 class MainActivity : AppCompatActivity() {
@@ -19,7 +20,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var statusText: TextView
     private lateinit var btnStart: Button
     private lateinit var btnStop: Button
+    private lateinit var btnShizuku: Button
     private lateinit var infoText: TextView
+
+    private val enhancedRecorder by lazy { ShizukuEnhancedRecorder(this) }
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -27,10 +31,10 @@ class MainActivity : AppCompatActivity() {
         val allGranted = results.values.all { it }
         if (allGranted) {
             Toast.makeText(this, "Permissions granted", Toast.LENGTH_SHORT).show()
-            updateUI()
         } else {
             Toast.makeText(this, "Some permissions denied – recording may fail", Toast.LENGTH_LONG).show()
         }
+        updateUI()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -40,6 +44,7 @@ class MainActivity : AppCompatActivity() {
         statusText = findViewById(R.id.statusText)
         btnStart = findViewById(R.id.btnStart)
         btnStop = findViewById(R.id.btnStop)
+        btnShizuku = findViewById(R.id.btnShizuku)
         infoText = findViewById(R.id.infoText)
 
         btnStart.setOnClickListener {
@@ -63,23 +68,24 @@ class MainActivity : AppCompatActivity() {
             statusText.text = "Recording stopped"
         }
 
-        infoText.text = """
-            Hybrid Call Recorder
-            
-            Classic path: MediaRecorder (may record only your side on many phones)
-            
-            For reliable both-sides:
-            1. Install Shizuku
-            2. Enable Wireless Debugging
-            3. Grant shell-level access
-            
-            See README for full details and legal notes.
-            
-            Auto-record on call state is enabled via CallStateReceiver.
-        """.trimIndent()
+        btnShizuku.setOnClickListener {
+            if (!ShizukuEnhancedRecorder.isShizukuInstalled(this)) {
+                Toast.makeText(this, "Please install Shizuku first", Toast.LENGTH_LONG).show()
+                return@setOnClickListener
+            }
+            enhancedRecorder.requestPermission()
+            Toast.makeText(this, "Check Shizuku app to grant permission", Toast.LENGTH_LONG).show()
+            // Refresh status after a short delay
+            statusText.postDelayed({ updateUI() }, 1500)
+        }
 
         updateUI()
         if (!checkPermissions()) requestPermissions()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        updateUI()
     }
 
     private fun checkPermissions(): Boolean {
@@ -107,6 +113,35 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateUI() {
-        statusText.text = if (checkPermissions()) "Ready" else "Permissions required"
+        val basicOk = checkPermissions()
+        val shizukuInstalled = ShizukuEnhancedRecorder.isShizukuInstalled(this)
+        val shizukuReady = enhancedRecorder.isAvailable()
+
+        val status = buildString {
+            append(if (basicOk) "Basic permissions: OK" else "Basic permissions: Missing")
+            append("\n")
+            append(when {
+                !shizukuInstalled -> "Shizuku: Not installed"
+                shizukuReady -> "Shizuku: Ready (Enhanced path available)"
+                else -> "Shizuku: Installed but not authorized"
+            })
+        }
+        statusText.text = status
+
+        infoText.text = """
+            Hybrid Call Recorder
+
+            Classic path: MediaRecorder (often only one side)
+            Enhanced path: Shizuku (best chance for both sides)
+
+            Setup for Enhanced:
+            1. Install Shizuku from GitHub / Play
+            2. Start Shizuku (Wireless Debugging recommended)
+            3. Tap "Request Shizuku Permission" below
+            4. Grant this app inside the Shizuku app
+
+            Auto-record is handled by CallStateReceiver.
+            See README for full details and legal notes.
+        """.trimIndent()
     }
 }
