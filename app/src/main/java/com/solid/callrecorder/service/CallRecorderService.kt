@@ -17,8 +17,8 @@ import com.solid.callrecorder.recorder.ShizukuEnhancedRecorder
 import com.solid.callrecorder.ui.MainActivity
 
 /**
- * Foreground service that prefers the Enhanced (Shizuku) path and falls back to Classic.
- * Shows the active capture strategy in the notification when available.
+ * Foreground service – prefers Enhanced (Shizuku), falls back to Classic.
+ * Optimized for low battery and silent operation (no tones, minimal notification).
  */
 class CallRecorderService : Service() {
 
@@ -28,6 +28,7 @@ class CallRecorderService : Service() {
     private var currentNumber: String? = null
     private var activeStrategyLabel: String? = null
     private var wakeLock: PowerManager.WakeLock? = null
+    private var isActive = false
 
     override fun onCreate() {
         super.onCreate()
@@ -38,67 +39,75 @@ class CallRecorderService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> {
+                if (isActive) {
+                    Log.d(TAG, "Already recording – ignore duplicate START")
+                    return START_NOT_STICKY
+                }
                 currentNumber = intent.getStringExtra(EXTRA_NUMBER)
                 startRecording()
             }
             ACTION_STOP -> {
-                stopRecording()
+                if (isActive) stopRecording()
+                else {
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                    stopSelf()
+                }
             }
         }
-        return START_STICKY
+        // NOT_STICKY: do not restart after kill when idle – saves battery
+        return START_NOT_STICKY
     }
 
     private fun startRecording() {
-        // Promote to foreground ASAP (Android 12+ background start rules)
-        promoteForeground("Starting…")
+        promoteForeground("Recording")
 
         val started = if (enhancedRecorder.isAvailable()) {
             usingEnhanced = true
-            Log.i(TAG, "Attempting Enhanced (Shizuku) path")
+            Log.i(TAG, "Enhanced (Shizuku) path")
             enhancedRecorder.start(currentNumber).also {
                 if (it) {
                     activeStrategyLabel = enhancedRecorder.lastStrategyLabel()
-                    Log.i(TAG, "Enhanced started, strategy=$activeStrategyLabel")
+                    Log.i(TAG, "Enhanced OK strategy=$activeStrategyLabel")
                 }
             }
         } else {
             usingEnhanced = false
-            Log.i(TAG, "Shizuku not ready – Classic path")
+            Log.i(TAG, "Classic path")
             classicRecorder.start(currentNumber)
         }
 
         if (!started && usingEnhanced) {
-            Log.w(TAG, "Enhanced failed – falling back to Classic")
+            Log.w(TAG, "Enhanced failed – Classic fallback")
             usingEnhanced = false
             activeStrategyLabel = null
             if (!classicRecorder.start(currentNumber)) {
-                Log.e(TAG, "Classic also failed – stopping service")
+                Log.e(TAG, "All paths failed")
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
                 return
             }
         } else if (!started) {
-            Log.e(TAG, "Could not start any recorder")
+            Log.e(TAG, "Could not start recorder")
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
             return
         }
 
+        isActive = true
         acquireWakeLock()
-        val mode = if (usingEnhanced) "Enhanced" else "Classic"
-        val strategy = activeStrategyLabel?.let { " · $it" } ?: ""
-        updateNotification("Recording ($mode$strategy)")
-        Log.i(TAG, "Recording active for $currentNumber ($mode$strategy)")
+        // Keep notification text short & generic – no strategy noise in UI
+        updateNotification("Recording")
     }
 
     private fun stopRecording() {
+        isActive = false
         val file = if (usingEnhanced) {
             enhancedRecorder.stop()
         } else {
             classicRecorder.stop()
         }
         releaseWakeLock()
-        Log.i(TAG, "Stopped. File=${file?.absolutePath} strategy=$activeStrategyLabel")
+        Log.i(TAG, "Stopped file=${file?.absolutePath} strategy=$activeStrategyLabel")
         activeStrategyLabel = null
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
@@ -129,35 +138,35 @@ class CallRecorderService : Service() {
             Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
-        val stopPending = PendingIntent.getService(
-            this, 1,
-            Intent(this, CallRecorderService::class.java).apply { action = ACTION_STOP },
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-        )
         return NotificationCompat.Builder(this, SolidApp.CHANNEL_ID)
-            .setContentTitle("Solid Call Recorder")
+            .setContentTitle("Call Recorder")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setContentIntent(pending)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
+            .setSilent(true)
+            .setPriority(NotificationCompat.PRIORITY_MIN)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
-            .addAction(android.R.drawable.ic_media_pause, "Stop", stopPending)
+            .setVisibility(NotificationCompat.VISIBILITY_SECRET)
+            .setShowWhen(false)
             .build()
     }
 
     private fun acquireWakeLock() {
         try {
+            releaseWakeLock()
             val pm = getSystemService(POWER_SERVICE) as PowerManager
             wakeLock = pm.newWakeLock(
                 PowerManager.PARTIAL_WAKE_LOCK,
-                "SolidCallRecorder:Recording"
+                "SolidCallRecorder:Rec"
             ).apply {
                 setReferenceCounted(false)
-                acquire(2 * 60 * 60 * 1000L) // 2h safety cap
+                // Cap at 3 hours – released on call end anyway
+                acquire(3 * 60 * 60 * 1000L)
             }
         } catch (e: Exception) {
-            Log.w(TAG, "WakeLock acquire failed", e)
+            Log.w(TAG, "WakeLock failed", e)
         }
     }
 
@@ -169,6 +178,12 @@ class CallRecorderService : Service() {
     }
 
     override fun onDestroy() {
+        if (isActive) {
+            try {
+                if (usingEnhanced) enhancedRecorder.stop() else classicRecorder.stop()
+            } catch (_: Exception) {}
+            isActive = false
+        }
         releaseWakeLock()
         enhancedRecorder.release()
         super.onDestroy()
