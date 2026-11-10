@@ -1,5 +1,6 @@
 package com.solid.callrecorder.shizuku
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.media.AudioFormat
 import android.media.AudioRecord
@@ -24,14 +25,16 @@ import java.util.concurrent.atomic.AtomicBoolean
  *
  * Strategy ladder (inspired by ShizuCallRecorder / cally):
  *  1. Dual VOICE_UPLINK + VOICE_DOWNLINK (best – separate sides)
- *  2. VOICE_CALL (stereo / mono)
+ *  2. VOICE_CALL
  *  3. VOICE_COMMUNICATION
  *  4. MIC (last resort)
  *
- * Audio is written as 16-bit PCM WAV so we keep full control of the data.
- * The app process later can convert or just keep the WAV.
+ * Audio is written as 16-bit PCM WAV.
+ *
+ * Shizuku instantiates this class in the elevated process.
+ * The public constructor that takes Context is required by Shizuku.
  */
-class ShellRecorderUserService : IShellRecorder.Stub() {
+class ShellRecorderUserService : IShellRecorder.Stub {
 
     private val recording = AtomicBoolean(false)
     private var uplinkRecord: AudioRecord? = null
@@ -42,22 +45,30 @@ class ShellRecorderUserService : IShellRecorder.Stub() {
     private var statusMessage: String = "idle"
     private var shellContext: Context? = null
 
-    /** Called by the system when the UserService is created. */
-    fun onCreate(context: Context) {
-        // Obtain a system context and wrap it so identity becomes com.android.shell
+    /** Required by Shizuku UserService – called when the privileged process starts the service. */
+    constructor(context: Context) {
         val base = try {
-            // Preferred: ActivityThread.systemMain().systemContext (reflection)
             val atClass = Class.forName("android.app.ActivityThread")
             val systemMain = atClass.getMethod("systemMain").invoke(null)
-            val systemContext = atClass.getMethod("getSystemContext").invoke(systemMain) as Context
-            systemContext
+            atClass.getMethod("getSystemContext").invoke(systemMain) as Context
         } catch (e: Throwable) {
-            Log.w(TAG, "Could not obtain system context via reflection, using passed context", e)
+            Log.w(TAG, "Could not obtain system context via reflection", e)
             context.applicationContext
         }
         shellContext = WrappedShellContext(base)
         Log.i(TAG, "ShellRecorderUserService created (uid=${android.os.Process.myUid()})")
     }
+
+    /** No-arg constructor required for some Shizuku / binder edge cases. */
+    constructor() : this(
+        try {
+            val atClass = Class.forName("android.app.ActivityThread")
+            val systemMain = atClass.getMethod("systemMain").invoke(null)
+            atClass.getMethod("getSystemContext").invoke(systemMain) as Context
+        } catch (e: Throwable) {
+            throw RuntimeException("Cannot create ShellRecorderUserService without context", e)
+        }
+    )
 
     @Throws(RemoteException::class)
     override fun start(outputPath: String, phoneNumber: String?): Boolean {
@@ -66,7 +77,7 @@ class ShellRecorderUserService : IShellRecorder.Stub() {
         val ctx = shellContext ?: return false
         outputFile = File(outputPath)
 
-        // Prefer creating AudioRecords on the main looper (AppOps / attribution)
+        // Create AudioRecords on the main looper (AppOps / attribution safety)
         val latch = CountDownLatch(1)
         var success = false
 
@@ -115,10 +126,10 @@ class ShellRecorderUserService : IShellRecorder.Stub() {
             up.startRecording()
             down.startRecording()
 
-            // Quick silence check (very short)
             Thread.sleep(80)
             if (up.recordingState != AudioRecord.RECORDSTATE_RECORDING ||
-                down.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+                down.recordingState != AudioRecord.RECORDSTATE_RECORDING
+            ) {
                 up.stop(); up.release()
                 down.stop(); down.release()
                 return false
@@ -177,7 +188,7 @@ class ShellRecorderUserService : IShellRecorder.Stub() {
     ): AudioRecord? {
         return try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                // Builder with explicit context – this is the key for attribution
+                // Builder + setContext is the key for shell attribution
                 AudioRecord.Builder()
                     .setContext(ctx)
                     .setAudioSource(source)
@@ -204,9 +215,8 @@ class ShellRecorderUserService : IShellRecorder.Stub() {
         writeThread = Thread({
             val file = outputFile ?: return@Thread
             try {
-                // Write a minimal WAV header first (we will patch sizes later)
                 FileOutputStream(file).use { fos ->
-                    writeWavHeader(fos, 0, 44100, 1, 16) // placeholder sizes
+                    writeWavHeader(fos, 0, 44100, 1, 16)
 
                     val buffer = ByteArray(4096)
                     var totalBytes = 0L
@@ -214,9 +224,6 @@ class ShellRecorderUserService : IShellRecorder.Stub() {
                     while (recording.get()) {
                         val read: Int = when {
                             uplinkRecord != null && downlinkRecord != null -> {
-                                // Interleave: simple mix (average) for mono output
-                                // For true separate tracks a more complex writer is needed;
-                                // this keeps a usable single WAV for now.
                                 val upBuf = ByteArray(2048)
                                 val downBuf = ByteArray(2048)
                                 val upRead = uplinkRecord!!.read(upBuf, 0, upBuf.size)
@@ -247,7 +254,6 @@ class ShellRecorderUserService : IShellRecorder.Stub() {
                         }
                     }
 
-                    // Patch WAV header with real sizes
                     patchWavHeader(file, totalBytes)
                 }
             } catch (e: Exception) {
@@ -285,8 +291,6 @@ class ShellRecorderUserService : IShellRecorder.Stub() {
     @Throws(RemoteException::class)
     override fun getStatus(): String = statusMessage
 
-    // --- WAV helpers ---
-
     private fun writeWavHeader(out: FileOutputStream, dataSize: Long, sampleRate: Int, channels: Int, bits: Int) {
         val byteRate = sampleRate * channels * bits / 8
         val header = ByteBuffer.allocate(44).order(ByteOrder.LITTLE_ENDIAN)
@@ -294,12 +298,12 @@ class ShellRecorderUserService : IShellRecorder.Stub() {
         header.putInt((36 + dataSize).toInt())
         header.put("WAVE".toByteArray())
         header.put("fmt ".toByteArray())
-        header.putInt(16) // PCM
-        header.putShort(1) // audio format = PCM
+        header.putInt(16)
+        header.putShort(1)
         header.putShort(channels.toShort())
         header.putInt(sampleRate)
         header.putInt(byteRate)
-        header.putShort((channels * bits / 8).toShort()) // block align
+        header.putShort((channels * bits / 8).toShort())
         header.putShort(bits.toShort())
         header.put("data".toByteArray())
         header.putInt(dataSize.toInt())
@@ -323,7 +327,3 @@ class ShellRecorderUserService : IShellRecorder.Stub() {
         private const val TAG = "ShellRecorderUS"
     }
 }
-
-// Needed because @SuppressLint is used inside the class
-@Suppress("unused")
-private annotation class SuppressLint(val value: String)
