@@ -6,7 +6,7 @@ A solid, hybrid Android call recorder focused on **both-sides voice recording** 
 > This project combines two approaches:
 
 1. **Classic path** – MediaRecorder + Telephony callbacks (works on some devices/OEM versions, often only one side).
-2. **Enhanced path** – Shizuku / Wireless Debugging (ADB) method (current best FOSS way to get both sides without root on many phones).
+2. **Enhanced path** – Shizuku skeleton (ready for both-sides implementation).
 
 The project is designed to work on **any Android phone** (not Huawei-specific).
 
@@ -14,9 +14,10 @@ The project is designed to work on **any Android phone** (not Huawei-specific).
 
 - Manual start/stop recording
 - Automatic recording via call state receiver
-- Structure ready for contact-based rules
+- Shizuku integration skeleton (`ShizukuEnhancedRecorder`)
+- Automatic fallback: Enhanced → Classic
+- Status display for Shizuku readiness
 - Notification while recording
-- Clean UI
 - **Manual GitHub Actions build only** (never runs automatically)
 
 ## Legal Notice
@@ -34,7 +35,32 @@ This app is provided for legitimate, lawful use only.
 | Built-in Wireless Debugging | Yes (many) | No        | One-time ADB pairing | Good                 |
 | Root                      | Yes         | Yes         | Root                 | Highest              |
 
-This project implements the Classic path fully and provides clear hooks + documentation for the Enhanced (Shizuku) path.
+## Shizuku Skeleton (Enhanced path)
+
+The class `ShizukuEnhancedRecorder` is already integrated:
+
+- Detects if Shizuku is installed
+- Checks if this app is authorized
+- Requests permission via Shizuku API
+- Service prefers Enhanced path when available, falls back to Classic
+
+**What still needs implementation** (the hard part):
+
+The actual both-sides audio capture using Shizuku privileges.  
+Typical techniques (see ShizuCallRecorder / CallVault):
+
+- Privileged `AudioRecord` / hidden AudioSystem APIs via Shizuku UserService
+- Or shell-level recording commands executed through Shizuku
+
+The skeleton returns `false` from `start()` so the app safely falls back to the classic path until you complete this part.
+
+### Setup for users
+
+1. Install [Shizuku](https://github.com/RikkaApps/Shizuku)
+2. Start Shizuku (Wireless Debugging is recommended – no root needed)
+3. Open this app → tap **Request Shizuku Permission**
+4. Grant the permission inside the Shizuku app
+5. Status should show "Shizuku: Ready"
 
 ## Building the APK (Manual only)
 
@@ -52,25 +78,23 @@ The workflow uses `workflow_dispatch` only — it will **never** run on push or 
 app/
   src/main/
     java/.../callrecorder/
-      ui/                 # MainActivity
-      service/            # Recording service + call state listener
-      recorder/           # MediaRecorder wrapper + Enhanced interface
+      ui/                 # MainActivity (shows Shizuku status)
+      service/            # Prefers Enhanced → Classic
+      recorder/
+        CallRecorder.kt              # Classic path
+        AudioSourceSelector.kt
+        ShizukuEnhancedRecorder.kt   # Enhanced skeleton
+        EnhancedRecorder (interface)
     res/
-  build.gradle.kts
+  build.gradle.kts                   # includes Shizuku dependencies
 .github/workflows/build-apk.yml
 ```
-
-## Recommended next steps for full both-sides
-
-1. Integrate [Shizuku](https://github.com/RikkaApps/Shizuku) API
-2. Use the shell-level audio capture technique (see ShizuCallRecorder / CallVault for reference architecture)
-3. Fallback gracefully to classic MediaRecorder when Shizuku is not available
 
 ## Credits & Inspiration
 
 - Modern FOSS projects: ShizuCallRecorder, JemRec, CallVault
 - Classic Android Telephony + MediaRecorder patterns
-- High-level workflow study of system recorders (no proprietary code used)
+- Shizuku by RikkaApps
 
 ---
 
