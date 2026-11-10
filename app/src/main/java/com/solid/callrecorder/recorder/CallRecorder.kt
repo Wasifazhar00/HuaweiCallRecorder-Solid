@@ -10,8 +10,8 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * Classic MediaRecorder based call recorder (baseline path).
- * For true both-sides on modern Android use the Enhanced path (Shizuku / ADB).
+ * Classic MediaRecorder path (no tones, no announcement).
+ * For true both-sides use Enhanced (Shizuku) path.
  */
 class CallRecorder(private val context: Context) {
 
@@ -38,12 +38,13 @@ class CallRecorder(private val context: Context) {
                 MediaRecorder()
             }.apply {
                 val source = AudioSourceSelector.getBestSource()
-                Log.i(TAG, "Using audio source: ${AudioSourceSelector.getSourceName(source)}")
+                Log.i(TAG, "Audio source: ${AudioSourceSelector.getSourceName(source)}")
                 setAudioSource(source)
                 setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
                 setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-                setAudioEncodingBitRate(128000)
-                setAudioSamplingRate(44100)
+                // 96 kbps is enough for voice and uses less CPU/battery than 128k
+                setAudioEncodingBitRate(96_000)
+                setAudioSamplingRate(16_000)
                 setOutputFile(outputFile!!.absolutePath)
                 prepare()
                 start()
@@ -51,7 +52,7 @@ class CallRecorder(private val context: Context) {
             isRecording = true
             true
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to start recording", e)
+            Log.e(TAG, "Start failed", e)
             release()
             false
         }
@@ -68,7 +69,7 @@ class CallRecorder(private val context: Context) {
             isRecording = false
             outputFile
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to stop recording", e)
+            Log.e(TAG, "Stop failed", e)
             release()
             null
         }
@@ -85,7 +86,6 @@ class CallRecorder(private val context: Context) {
     }
 }
 
-/** Interface for the Enhanced path (Shizuku / ADB shell level). */
 interface EnhancedRecorder {
     fun isAvailable(): Boolean
     fun start(phoneNumber: String?): Boolean
