@@ -10,12 +10,13 @@ on:
         default: 'debug'
         type: choice
         options:
-          - release
           - debug
+          - release
 
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -28,36 +29,53 @@ jobs:
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: 'tools platform-tools platforms;android-35 build-tools;35.0.0'
+
+      - name: Accept Android SDK licenses
+        run: |
+          mkdir -p "$ANDROID_HOME/licenses"
+          echo -e "24333f8a63b6825ea9c5514f83c2829b004d1fee\n" > "$ANDROID_HOME/licenses/android-sdk-license"
+          echo -e "84831b9409646a918e30573bab4c9c91346d8abd\n" > "$ANDROID_HOME/licenses/android-sdk-preview-license"
+          echo -e "d56f5187479451eabf01fb78af6dfcb131a6481e\n" > "$ANDROID_HOME/licenses/android-sdk-license" || true
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          sdkmanager "platforms;android-35" "build-tools;35.0.0" "platform-tools" || true
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Make gradlew executable (if present)
-        run: |
-          if [ -f gradlew ]; then
-            chmod +x gradlew
-          else
-            echo "No gradlew found – will use system gradle after wrapper generation"
-          fi
-
-      - name: Generate Gradle Wrapper if missing
+      - name: Create Gradle Wrapper
         run: |
           if [ ! -f gradlew ]; then
             gradle wrapper --gradle-version 8.9
+            chmod +x gradlew
+          else
             chmod +x gradlew
           fi
 
       - name: Build APK
         run: |
           if [ "${{ github.event.inputs.build_type }}" = "release" ]; then
-            ./gradlew assembleRelease --stacktrace
+            ./gradlew assembleRelease --stacktrace --info
           else
-            ./gradlew assembleDebug --stacktrace
+            ./gradlew assembleDebug --stacktrace --info
           fi
 
       - name: Upload APK
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: SolidCallRecorder-${{ github.event.inputs.build_type }}
           path: |
             app/build/outputs/apk/**/*.apk
+          if-no-files-found: error
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-failure-logs
+          path: |
+            **/build/**/*.log
+            **/*.txt
+          if-no-files-found: ignore
