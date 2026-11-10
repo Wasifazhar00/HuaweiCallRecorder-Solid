@@ -6,55 +6,81 @@ import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.os.IBinder
 import android.util.Log
+import com.solid.callrecorder.IShellRecorder
+import com.solid.callrecorder.shizuku.ShellRecorderUserService
 import rikka.shizuku.Shizuku
 import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /**
- * Skeleton for the Enhanced recording path using Shizuku.
+ * Enhanced recording path using Shizuku UserService.
  *
- * Shizuku gives the app shell-level privileges (similar to ADB),
- * which is currently the most reliable way to capture both sides
- * of a call on non-rooted devices.
+ * The actual audio capture runs inside a process started by Shizuku
+ * (UID 2000 = shell). That process uses WrappedShellContext so
+ * AudioFlinger sees the identity "com.android.shell" and allows
+ * VOICE_UPLINK / VOICE_DOWNLINK / VOICE_CALL sources.
  *
- * This is a clean skeleton. The actual audio capture logic
- * (usually involving hidden AudioSystem / AudioRecord APIs or
- * shell commands) still needs to be implemented following
- * the techniques used by projects such as ShizuCallRecorder.
- *
- * Usage flow:
- * 1. User installs Shizuku app and starts it (via Wireless Debugging or root)
- * 2. User grants permission to this app inside Shizuku
- * 3. isAvailable() returns true
- * 4. start() / stop() can then use the elevated privileges
+ * Fallback order inside the UserService:
+ *   1. Dual UPLINK + DOWNLINK
+ *   2. VOICE_CALL
+ *   3. VOICE_COMMUNICATION
+ *   4. MIC
  */
 class ShizukuEnhancedRecorder(private val context: Context) : EnhancedRecorder {
 
-    private var isBound = false
+    private var service: IShellRecorder? = null
+    private var bound = false
     private var currentOutput: File? = null
+
+    private val userServiceArgs = Shizuku.UserServiceArgs(
+        ComponentName(context.packageName, ShellRecorderUserService::class.java.name)
+    )
+        .daemon(false)
+        .processNameSuffix("shellrecorder")
+        .debuggable(false)
+        .version(1)
+
+    private val connection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
+            if (binder != null && binder.pingBinder()) {
+                service = IShellRecorder.Stub.asInterface(binder)
+                bound = true
+                Log.i(TAG, "UserService connected")
+            }
+        }
+
+        override fun onServiceDisconnected(name: ComponentName?) {
+            service = null
+            bound = false
+            Log.w(TAG, "UserService disconnected")
+        }
+    }
 
     private val binderReceivedListener = Shizuku.OnBinderReceivedListener {
         Log.i(TAG, "Shizuku binder received")
-        isBound = true
     }
 
     private val binderDeadListener = Shizuku.OnBinderDeadListener {
         Log.w(TAG, "Shizuku binder died")
-        isBound = false
+        service = null
+        bound = false
     }
 
     init {
-        // Register listeners (safe even if Shizuku is not present)
         try {
             Shizuku.addBinderReceivedListenerSticky(binderReceivedListener)
             Shizuku.addBinderDeadListener(binderDeadListener)
         } catch (e: Throwable) {
-            Log.w(TAG, "Shizuku not available on this device", e)
+            Log.w(TAG, "Shizuku not present", e)
         }
     }
 
     override fun isAvailable(): Boolean {
         return try {
-            // Shizuku must be running and this app must be authorized
             Shizuku.pingBinder() &&
                     Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
         } catch (e: Throwable) {
@@ -62,64 +88,126 @@ class ShizukuEnhancedRecorder(private val context: Context) : EnhancedRecorder {
         }
     }
 
-    /** Request Shizuku permission if not already granted. */
     fun requestPermission(requestCode: Int = 1001) {
         try {
-            if (Shizuku.isPreV11()) {
-                // Old Shizuku – handled differently
-                Log.w(TAG, "Pre-v11 Shizuku not fully supported in this skeleton")
-            } else {
+            if (!Shizuku.isPreV11()) {
                 Shizuku.requestPermission(requestCode)
             }
         } catch (e: Throwable) {
-            Log.e(TAG, "Failed to request Shizuku permission", e)
+            Log.e(TAG, "requestPermission failed", e)
+        }
+    }
+
+    /** Bind the privileged UserService if not already bound. */
+    private fun ensureBound(): Boolean {
+        if (bound && service != null) return true
+        if (!isAvailable()) return false
+
+        val latch = CountDownLatch(1)
+        val conn = object : ServiceConnection {
+            override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
+                if (binder != null && binder.pingBinder()) {
+                    service = IShellRecorder.Stub.asInterface(binder)
+                    bound = true
+                    Log.i(TAG, "UserService bound successfully")
+                }
+                latch.countDown()
+            }
+
+            override fun onServiceDisconnected(name: ComponentName?) {
+                service = null
+                bound = false
+            }
+        }
+
+        return try {
+            Shizuku.bindUserService(userServiceArgs, conn)
+            val ok = latch.await(5, TimeUnit.SECONDS) && bound
+            if (!ok) Log.w(TAG, "bindUserService timed out or failed")
+            ok
+        } catch (e: Throwable) {
+            Log.e(TAG, "bindUserService error", e)
+            false
         }
     }
 
     override fun start(phoneNumber: String?): Boolean {
         if (!isAvailable()) {
-            Log.w(TAG, "Shizuku not available or not authorized")
+            Log.w(TAG, "Shizuku not available / not authorized")
             return false
         }
 
-        // TODO: Implement real both-sides capture here.
-        // Typical approaches:
-        // 1. Use Shizuku to run shell commands that start a privileged recorder
-        // 2. Or obtain a privileged AudioRecord / MediaRecorder via reflection
-        //    + Shizuku's user service / binder
-        // See ShizuCallRecorder / CallVault source for working implementations.
+        if (!ensureBound()) {
+            Log.w(TAG, "Could not bind privileged UserService")
+            return false
+        }
 
-        Log.i(TAG, "[Skeleton] Would start enhanced both-sides recording for $phoneNumber")
-        Log.i(TAG, "[Skeleton] Real implementation still needs to be added")
+        val recordingsDir = File(context.getExternalFilesDir(null), "CallRecordings")
+        if (!recordingsDir.exists()) recordingsDir.mkdirs()
 
-        // Placeholder so the rest of the app can compile and fall back gracefully
-        return false
+        val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        val safeNumber = phoneNumber?.replace(Regex("[^0-9+]"), "") ?: "unknown"
+        val outFile = File(recordingsDir, "Enhanced_${safeNumber}_$timestamp.wav")
+        currentOutput = outFile
+
+        return try {
+            val started = service?.start(outFile.absolutePath, phoneNumber) == true
+            if (started) {
+                Log.i(TAG, "Enhanced recording started → ${outFile.name}")
+            } else {
+                Log.w(TAG, "UserService.start returned false (all sources failed)")
+                currentOutput = null
+            }
+            started
+        } catch (e: Exception) {
+            Log.e(TAG, "start via UserService failed", e)
+            currentOutput = null
+            false
+        }
     }
 
     override fun stop(): File? {
-        Log.i(TAG, "[Skeleton] Would stop enhanced recording")
-        val file = currentOutput
-        currentOutput = null
-        return file
+        return try {
+            val path = service?.stop()
+            val file = path?.let { File(it) } ?: currentOutput
+            currentOutput = null
+            Log.i(TAG, "Enhanced recording stopped → ${file?.absolutePath}")
+            file
+        } catch (e: Exception) {
+            Log.e(TAG, "stop failed", e)
+            currentOutput
+        }
     }
 
     fun release() {
         try {
+            if (bound) {
+                Shizuku.unbindUserService(userServiceArgs, connection, true)
+            }
+        } catch (_: Throwable) {}
+        try {
             Shizuku.removeBinderReceivedListener(binderReceivedListener)
             Shizuku.removeBinderDeadListener(binderDeadListener)
         } catch (_: Throwable) {}
+        service = null
+        bound = false
     }
 
     companion object {
         private const val TAG = "ShizukuEnhancedRecorder"
 
-        /** Quick check whether the Shizuku app is installed. */
         fun isShizukuInstalled(context: Context): Boolean {
             return try {
                 context.packageManager.getPackageInfo("moe.shizuku.privileged.api", 0)
                 true
             } catch (_: PackageManager.NameNotFoundException) {
-                false
+                // also try the newer package name used by some forks
+                try {
+                    context.packageManager.getPackageInfo("moe.shizuku.manager", 0)
+                    true
+                } catch (_: PackageManager.NameNotFoundException) {
+                    false
+                }
             }
         }
     }
