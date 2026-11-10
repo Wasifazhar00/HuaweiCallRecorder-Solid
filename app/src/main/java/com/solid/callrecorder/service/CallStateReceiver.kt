@@ -13,10 +13,11 @@ class CallStateReceiver : BroadcastReceiver() {
         val number = intent.getStringExtra(TelephonyManager.EXTRA_INCOMING_NUMBER)
             ?: intent.getStringExtra(Intent.EXTRA_PHONE_NUMBER)
 
-        Log.d(TAG, "Phone state: $state, number: $number")
+        Log.d(TAG, "state=$state number=$number")
 
         when (state) {
             TelephonyManager.EXTRA_STATE_OFFHOOK -> {
+                // Start only when call is connected – no ring-time recording
                 val start = Intent(context, CallRecorderService::class.java).apply {
                     action = CallRecorderService.ACTION_START
                     putExtra(CallRecorderService.EXTRA_NUMBER, number)
@@ -29,6 +30,7 @@ class CallStateReceiver : BroadcastReceiver() {
                 }
                 context.startService(stop)
             }
+            // RINGING: do nothing (saves battery, no false starts)
         }
     }
 
