@@ -9,11 +9,10 @@ android {
 
     defaultConfig {
         applicationId = "com.solid.callrecorder"
-        // Classic path works from 26. Enhanced (Builder.setContext) needs 31+.
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "1.1.0-enhanced"
+        versionCode = 3
+        versionName = "1.2.0"
     }
 
     buildTypes {
@@ -43,10 +42,7 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
     implementation("androidx.activity:activity-ktx:1.9.3")
 
-    // Shizuku – elevated privileges for both-sides capture
     implementation("dev.rikka.shizuku:api:13.1.5")
     implementation("dev.rikka.shizuku:provider:13.1.5")
-
-    // Helps with reflective access on newer Android (used by WrappedShellContext helpers)
     implementation("org.lsposed.hiddenapibypass:hiddenapibypass:4.3")
 }
