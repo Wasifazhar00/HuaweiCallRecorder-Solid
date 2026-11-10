@@ -1,6 +1,6 @@
 name: Build APK
 
-# Manual trigger only — never runs automatically on push/PR
+# Manual trigger only
 on:
   workflow_dispatch:
     inputs:
@@ -12,6 +12,10 @@ on:
         options:
           - debug
           - release
+
+env:
+  ANDROID_HOME: ${{ github.workspace }}/android-sdk
+  ANDROID_SDK_ROOT: ${{ github.workspace }}/android-sdk
 
 jobs:
   build:
@@ -27,38 +31,49 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          packages: 'tools platform-tools platforms;android-35 build-tools;35.0.0'
+      - name: Install Android command-line tools
+        run: |
+          mkdir -p "$ANDROID_HOME/cmdline-tools"
+          curl -fsSL https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -o /tmp/cmdtools.zip
+          unzip -q /tmp/cmdtools.zip -d "$ANDROID_HOME/cmdline-tools"
+          mv "$ANDROID_HOME/cmdline-tools/cmdline-tools" "$ANDROID_HOME/cmdline-tools/latest"
+          echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> $GITHUB_PATH
+          echo "$ANDROID_HOME/platform-tools" >> $GITHUB_PATH
 
-      - name: Accept Android SDK licenses
+      - name: Accept licenses and install SDK packages
         run: |
           mkdir -p "$ANDROID_HOME/licenses"
-          echo -e "24333f8a63b6825ea9c5514f83c2829b004d1fee\n" > "$ANDROID_HOME/licenses/android-sdk-license"
-          echo -e "84831b9409646a918e30573bab4c9c91346d8abd\n" > "$ANDROID_HOME/licenses/android-sdk-preview-license"
-          echo -e "d56f5187479451eabf01fb78af6dfcb131a6481e\n" > "$ANDROID_HOME/licenses/android-sdk-license" || true
-          yes | sdkmanager --licenses >/dev/null 2>&1 || true
-          sdkmanager "platforms;android-35" "build-tools;35.0.0" "platform-tools" || true
+          printf '%s\n' \
+            "24333f8a63b6825ea9c5514f83c2829b004d1fee" \
+            "d56f5187479451eabf01fb78af6dfcb131a6481e" \
+            "24333f8a63b6825ea9c5514f83c2829b004d1fee" \
+            > "$ANDROID_HOME/licenses/android-sdk-license"
+          printf '%s\n' "84831b9409646a918e30573bab4c9c91346d8abd" \
+            > "$ANDROID_HOME/licenses/android-sdk-preview-license"
+          yes 2>/dev/null | sdkmanager --sdk_root="$ANDROID_HOME" --licenses >/dev/null || true
+          sdkmanager --sdk_root="$ANDROID_HOME" \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
       - name: Create Gradle Wrapper
         run: |
-          if [ ! -f gradlew ]; then
+          if [ ! -f ./gradlew ]; then
             gradle wrapper --gradle-version 8.9
-            chmod +x gradlew
-          else
-            chmod +x gradlew
           fi
+          chmod +x ./gradlew
 
       - name: Build APK
         run: |
+          export ANDROID_HOME="$ANDROID_HOME"
+          export ANDROID_SDK_ROOT="$ANDROID_HOME"
           if [ "${{ github.event.inputs.build_type }}" = "release" ]; then
-            ./gradlew assembleRelease --stacktrace --info
+            ./gradlew assembleRelease --stacktrace
           else
-            ./gradlew assembleDebug --stacktrace --info
+            ./gradlew assembleDebug --stacktrace
           fi
 
       - name: Upload APK
@@ -66,16 +81,15 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: SolidCallRecorder-${{ github.event.inputs.build_type }}
-          path: |
-            app/build/outputs/apk/**/*.apk
+          path: app/build/outputs/apk/**/*.apk
           if-no-files-found: error
 
-      - name: Upload build log on failure
+      - name: Upload failure logs
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: build-failure-logs
           path: |
-            **/build/**/*.log
-            **/*.txt
+            **/reports/**
+            **/*.log
           if-no-files-found: ignore
