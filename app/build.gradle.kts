@@ -41,4 +41,8 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
     implementation("androidx.activity:activity-ktx:1.9.3")
     implementation("androidx.core:core:1.15.0")
+
+    // Shizuku for enhanced (shell-level) both-sides recording path
+    implementation("dev.rikka.shizuku:api:13.1.5")
+    implementation("dev.rikka.shizuku:provider:13.1.5")
 }
