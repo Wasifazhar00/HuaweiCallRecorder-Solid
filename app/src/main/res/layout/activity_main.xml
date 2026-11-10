@@ -8,26 +8,33 @@
 
     <TextView
         android:id="@+id/statusText"
-        android:layout_width="wrap_content"
+        android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:text="Status"
-        android:textSize="20sp"
+        android:textSize="16sp"
         android:textStyle="bold"
-        android:layout_marginBottom="24dp" />
+        android:layout_marginBottom="16dp" />
 
     <Button
         android:id="@+id/btnStart"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:text="Start Manual Recording"
-        android:layout_marginBottom="12dp" />
+        android:layout_marginBottom="8dp" />
 
     <Button
         android:id="@+id/btnStop"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:text="Stop Recording"
-        android:layout_marginBottom="32dp" />
+        android:layout_marginBottom="8dp" />
+
+    <Button
+        android:id="@+id/btnShizuku"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Request Shizuku Permission"
+        android:layout_marginBottom="24dp" />
 
     <ScrollView
         android:layout_width="match_parent"
