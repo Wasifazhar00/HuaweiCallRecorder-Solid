@@ -75,7 +75,6 @@ class MainActivity : AppCompatActivity() {
             }
             enhancedRecorder.requestPermission()
             Toast.makeText(this, "Check Shizuku app to grant permission", Toast.LENGTH_LONG).show()
-            // Refresh status after a short delay
             statusText.postDelayed({ updateUI() }, 1500)
         }
 
@@ -129,19 +128,20 @@ class MainActivity : AppCompatActivity() {
         statusText.text = status
 
         infoText.text = """
-            Hybrid Call Recorder
+            Solid Call Recorder v1.1 (Enhanced)
 
-            Classic path: MediaRecorder (often only one side)
-            Enhanced path: Shizuku (best chance for both sides)
+            Classic path: MediaRecorder (often one side)
+            Enhanced path: Shizuku UserService + shell identity
+            → tries VOICE_UPLINK + VOICE_DOWNLINK first
 
-            Setup for Enhanced:
-            1. Install Shizuku from GitHub / Play
-            2. Start Shizuku (Wireless Debugging recommended)
-            3. Tap "Request Shizuku Permission" below
-            4. Grant this app inside the Shizuku app
+            Setup for both-sides:
+            1. Install & start Shizuku (Wireless Debugging)
+            2. Tap "Request Shizuku Permission"
+            3. Grant this app inside Shizuku
+            4. Make a call – Enhanced path is preferred automatically
 
-            Auto-record is handled by CallStateReceiver.
-            See README for full details and legal notes.
+            Recordings: Android/data/.../files/CallRecordings/
+            See README for technical details and legal notes.
         """.trimIndent()
     }
 }
