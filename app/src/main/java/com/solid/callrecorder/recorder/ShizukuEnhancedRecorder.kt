@@ -17,24 +17,15 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 /**
- * Enhanced recording path using Shizuku UserService.
- *
- * The actual audio capture runs inside a process started by Shizuku
- * (UID 2000 = shell). That process uses WrappedShellContext so
- * AudioFlinger sees the identity "com.android.shell" and allows
- * VOICE_UPLINK / VOICE_DOWNLINK / VOICE_CALL sources.
- *
- * Fallback order inside the UserService:
- *   1. Dual UPLINK + DOWNLINK
- *   2. VOICE_CALL
- *   3. VOICE_COMMUNICATION
- *   4. MIC
+ * Enhanced path: binds Shizuku UserService (shell UID) and drives privileged capture.
+ * After start(), call [lastStrategyLabel] to learn which source succeeded.
  */
 class ShizukuEnhancedRecorder(private val context: Context) : EnhancedRecorder {
 
     private var service: IShellRecorder? = null
     private var bound = false
     private var currentOutput: File? = null
+    private var lastStrategy: String? = null
 
     private val userServiceArgs = Shizuku.UserServiceArgs(
         ComponentName(context.packageName, ShellRecorderUserService::class.java.name)
@@ -42,7 +33,7 @@ class ShizukuEnhancedRecorder(private val context: Context) : EnhancedRecorder {
         .daemon(false)
         .processNameSuffix("shellrecorder")
         .debuggable(false)
-        .version(1)
+        .version(2)
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
@@ -98,7 +89,9 @@ class ShizukuEnhancedRecorder(private val context: Context) : EnhancedRecorder {
         }
     }
 
-    /** Bind the privileged UserService if not already bound. */
+    /** Label of the strategy that succeeded on the last start(), or null. */
+    fun lastStrategyLabel(): String? = lastStrategy
+
     private fun ensureBound(): Boolean {
         if (bound && service != null) return true
         if (!isAvailable()) return false
@@ -132,11 +125,11 @@ class ShizukuEnhancedRecorder(private val context: Context) : EnhancedRecorder {
     }
 
     override fun start(phoneNumber: String?): Boolean {
+        lastStrategy = null
         if (!isAvailable()) {
             Log.w(TAG, "Shizuku not available / not authorized")
             return false
         }
-
         if (!ensureBound()) {
             Log.w(TAG, "Could not bind privileged UserService")
             return false
@@ -153,9 +146,13 @@ class ShizukuEnhancedRecorder(private val context: Context) : EnhancedRecorder {
         return try {
             val started = service?.start(outFile.absolutePath, phoneNumber) == true
             if (started) {
-                Log.i(TAG, "Enhanced recording started → ${outFile.name}")
+                lastStrategy = try {
+                    service?.activeStrategy?.takeIf { it.isNotBlank() }
+                } catch (_: Exception) { null }
+                val status = try { service?.status } catch (_: Exception) { null }
+                Log.i(TAG, "Enhanced started → ${outFile.name} strategy=$lastStrategy status=$status")
             } else {
-                Log.w(TAG, "UserService.start returned false (all sources failed)")
+                Log.w(TAG, "UserService.start returned false (all sources failed/silent)")
                 currentOutput = null
             }
             started
@@ -171,7 +168,7 @@ class ShizukuEnhancedRecorder(private val context: Context) : EnhancedRecorder {
             val path = service?.stop()
             val file = path?.let { File(it) } ?: currentOutput
             currentOutput = null
-            Log.i(TAG, "Enhanced recording stopped → ${file?.absolutePath}")
+            Log.i(TAG, "Enhanced stopped → ${file?.absolutePath} strategy=$lastStrategy")
             file
         } catch (e: Exception) {
             Log.e(TAG, "stop failed", e)
@@ -191,6 +188,7 @@ class ShizukuEnhancedRecorder(private val context: Context) : EnhancedRecorder {
         } catch (_: Throwable) {}
         service = null
         bound = false
+        lastStrategy = null
     }
 
     companion object {
@@ -201,7 +199,6 @@ class ShizukuEnhancedRecorder(private val context: Context) : EnhancedRecorder {
                 context.packageManager.getPackageInfo("moe.shizuku.privileged.api", 0)
                 true
             } catch (_: PackageManager.NameNotFoundException) {
-                // also try the newer package name used by some forks
                 try {
                     context.packageManager.getPackageInfo("moe.shizuku.manager", 0)
                     true
