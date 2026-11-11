@@ -16,10 +16,6 @@ import com.solid.callrecorder.recorder.CallRecorder
 import com.solid.callrecorder.recorder.ShizukuEnhancedRecorder
 import com.solid.callrecorder.ui.MainActivity
 
-/**
- * Foreground service – prefers Enhanced (Shizuku), falls back to Classic.
- * Optimized for low battery and silent operation (no tones, minimal notification).
- */
 class CallRecorderService : Service() {
 
     private lateinit var classicRecorder: CallRecorder
@@ -39,12 +35,10 @@ class CallRecorderService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> {
-                if (isActive) {
-                    Log.d(TAG, "Already recording – ignore duplicate START")
-                    return START_NOT_STICKY
-                }
+                if (isActive) return START_NOT_STICKY
                 currentNumber = intent.getStringExtra(EXTRA_NUMBER)
-                startRecording()
+                val offline = intent.getBooleanExtra(EXTRA_OFFLINE_ONLY, offlinePref())
+                startRecording(offline)
             }
             ACTION_STOP -> {
                 if (isActive) stopRecording()
@@ -54,40 +48,38 @@ class CallRecorderService : Service() {
                 }
             }
         }
-        // NOT_STICKY: do not restart after kill when idle – saves battery
         return START_NOT_STICKY
     }
 
-    private fun startRecording() {
+    private fun offlinePref(): Boolean =
+        getSharedPreferences(MainActivity.PREFS, MODE_PRIVATE)
+            .getBoolean(MainActivity.KEY_OFFLINE_ONLY, false)
+
+    private fun startRecording(offlineOnly: Boolean) {
         promoteForeground("Recording")
 
-        val started = if (enhancedRecorder.isAvailable()) {
+        val tryEnhanced = !offlineOnly && enhancedRecorder.isAvailable()
+        val started = if (tryEnhanced) {
             usingEnhanced = true
-            Log.i(TAG, "Enhanced (Shizuku) path")
+            Log.i(TAG, "Enhanced path")
             enhancedRecorder.start(currentNumber).also {
-                if (it) {
-                    activeStrategyLabel = enhancedRecorder.lastStrategyLabel()
-                    Log.i(TAG, "Enhanced OK strategy=$activeStrategyLabel")
-                }
+                if (it) activeStrategyLabel = enhancedRecorder.lastStrategyLabel()
             }
         } else {
             usingEnhanced = false
-            Log.i(TAG, "Classic path")
+            Log.i(TAG, if (offlineOnly) "Offline Classic" else "Classic (no Shizuku)")
             classicRecorder.start(currentNumber)
         }
 
         if (!started && usingEnhanced) {
-            Log.w(TAG, "Enhanced failed – Classic fallback")
             usingEnhanced = false
             activeStrategyLabel = null
             if (!classicRecorder.start(currentNumber)) {
-                Log.e(TAG, "All paths failed")
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
                 return
             }
         } else if (!started) {
-            Log.e(TAG, "Could not start recorder")
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
             return
@@ -95,41 +87,34 @@ class CallRecorderService : Service() {
 
         isActive = true
         acquireWakeLock()
-        // Keep notification text short & generic – no strategy noise in UI
         updateNotification("Recording")
     }
 
     private fun stopRecording() {
         isActive = false
-        val file = if (usingEnhanced) {
-            enhancedRecorder.stop()
-        } else {
-            classicRecorder.stop()
-        }
+        val file = if (usingEnhanced) enhancedRecorder.stop() else classicRecorder.stop()
         releaseWakeLock()
-        Log.i(TAG, "Stopped file=${file?.absolutePath} strategy=$activeStrategyLabel")
+        Log.i(TAG, "Stopped ${file?.name} strategy=$activeStrategyLabel")
         activeStrategyLabel = null
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
 
     private fun promoteForeground(text: String) {
-        val notification = buildNotification(text)
+        val n = buildNotification(text)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             ServiceCompat.startForeground(
-                this,
-                NOTIFICATION_ID,
-                notification,
+                this, NOTIFICATION_ID, n,
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
             )
         } else {
-            startForeground(NOTIFICATION_ID, notification)
+            startForeground(NOTIFICATION_ID, n)
         }
     }
 
     private fun updateNotification(text: String) {
-        val nm = getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager
-        nm.notify(NOTIFICATION_ID, buildNotification(text))
+        (getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager)
+            .notify(NOTIFICATION_ID, buildNotification(text))
     }
 
     private fun buildNotification(text: String): Notification {
@@ -162,11 +147,10 @@ class CallRecorderService : Service() {
                 "SolidCallRecorder:Rec"
             ).apply {
                 setReferenceCounted(false)
-                // Cap at 3 hours – released on call end anyway
                 acquire(3 * 60 * 60 * 1000L)
             }
         } catch (e: Exception) {
-            Log.w(TAG, "WakeLock failed", e)
+            Log.w(TAG, "WakeLock", e)
         }
     }
 
@@ -195,6 +179,7 @@ class CallRecorderService : Service() {
         const val ACTION_START = "com.solid.callrecorder.START"
         const val ACTION_STOP = "com.solid.callrecorder.STOP"
         const val EXTRA_NUMBER = "number"
+        const val EXTRA_OFFLINE_ONLY = "offline_only"
         private const val NOTIFICATION_ID = 1001
         private const val TAG = "CallRecorderService"
     }
