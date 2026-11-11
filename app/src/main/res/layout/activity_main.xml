@@ -15,17 +15,25 @@
         android:layout_marginBottom="12dp" />
 
     <CheckBox
+        android:id="@+id/chkAuto"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Auto-record incoming & outgoing calls"
+        android:checked="true"
+        android:layout_marginBottom="4dp" />
+
+    <CheckBox
         android:id="@+id/chkOfflineOnly"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="Offline only (no Shizuku – Classic path)"
+        android:text="Offline only (Classic – no Shizuku)"
         android:layout_marginBottom="12dp" />
 
     <Button
         android:id="@+id/btnStart"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="Start recording"
+        android:text="Start manual recording"
         android:layout_marginBottom="6dp" />
 
     <Button
@@ -39,7 +47,7 @@
         android:id="@+id/btnShizuku"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="Authorize Shizuku / Shizuku-Next"
+        android:text="Authorize Shizuku-Next (optional)"
         android:layout_marginBottom="16dp" />
 
     <ScrollView
