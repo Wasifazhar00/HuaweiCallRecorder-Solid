@@ -23,12 +23,17 @@ import com.solid.callrecorder.service.CallRecorderService
 class MainActivity : AppCompatActivity() {
 
     private lateinit var statusText: TextView
+    private lateinit var checklistText: TextView
+    private lateinit var infoText: TextView
+    private lateinit var btnPerms: Button
+    private lateinit var btnBattery: Button
+    private lateinit var btnGetShizuku: Button
+    private lateinit var btnOpenShizuku: Button
+    private lateinit var btnShizuku: Button
     private lateinit var btnStart: Button
     private lateinit var btnStop: Button
-    private lateinit var btnShizuku: Button
     private lateinit var chkOfflineOnly: CheckBox
     private lateinit var chkAuto: CheckBox
-    private lateinit var infoText: TextView
 
     private val prefs by lazy { getSharedPreferences(PREFS, MODE_PRIVATE) }
     private val enhanced by lazy { ShizukuEnhancedRecorder(this) }
@@ -38,7 +43,6 @@ class MainActivity : AppCompatActivity() {
     ) { results ->
         if (results.values.all { it }) {
             Toast.makeText(this, "Permissions OK", Toast.LENGTH_SHORT).show()
-            maybeRequestBatteryExemption()
             if (prefs.getBoolean(KEY_AUTO_RECORD, true)) {
                 CallMonitorService.start(this)
             }
@@ -51,19 +55,23 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
 
         statusText = findViewById(R.id.statusText)
+        checklistText = findViewById(R.id.checklistText)
+        infoText = findViewById(R.id.infoText)
+        btnPerms = findViewById(R.id.btnPerms)
+        btnBattery = findViewById(R.id.btnBattery)
+        btnGetShizuku = findViewById(R.id.btnGetShizuku)
+        btnOpenShizuku = findViewById(R.id.btnOpenShizuku)
+        btnShizuku = findViewById(R.id.btnShizuku)
         btnStart = findViewById(R.id.btnStart)
         btnStop = findViewById(R.id.btnStop)
-        btnShizuku = findViewById(R.id.btnShizuku)
         chkOfflineOnly = findViewById(R.id.chkOfflineOnly)
         chkAuto = findViewById(R.id.chkAuto)
-        infoText = findViewById(R.id.infoText)
 
         chkOfflineOnly.isChecked = prefs.getBoolean(KEY_OFFLINE_ONLY, false)
         chkAuto.isChecked = prefs.getBoolean(KEY_AUTO_RECORD, true)
 
         chkOfflineOnly.setOnCheckedChangeListener { _, checked ->
             prefs.edit().putBoolean(KEY_OFFLINE_ONLY, checked).apply()
-            btnShizuku.isEnabled = !checked
             updateUI()
         }
         chkAuto.setOnCheckedChangeListener { _, checked ->
@@ -72,7 +80,27 @@ class MainActivity : AppCompatActivity() {
             else CallMonitorService.stop(this)
             updateUI()
         }
-        btnShizuku.isEnabled = !chkOfflineOnly.isChecked
+
+        btnPerms.setOnClickListener { requestPermissions() }
+        btnBattery.setOnClickListener { openBatterySettings() }
+        btnGetShizuku.setOnClickListener { openShizukuDownload() }
+        btnOpenShizuku.setOnClickListener { openShizukuApp() }
+
+        btnShizuku.setOnClickListener {
+            if (!ShizukuEnhancedRecorder.isShizukuInstalled(this)) {
+                Toast.makeText(this, "Install Shizuku-Next first (step 3)", Toast.LENGTH_LONG).show()
+                openShizukuDownload()
+                return@setOnClickListener
+            }
+            if (!isShizukuRunning()) {
+                Toast.makeText(this, "Start Shizuku-Next first (step 4)", Toast.LENGTH_LONG).show()
+                openShizukuApp()
+                return@setOnClickListener
+            }
+            enhanced.requestPermission()
+            Toast.makeText(this, "Grant Solid Call Recorder in Shizuku-Next", Toast.LENGTH_LONG).show()
+            statusText.postDelayed({ updateUI() }, 1500)
+        }
 
         btnStart.setOnClickListener {
             if (!checkPermissions()) {
@@ -86,7 +114,8 @@ class MainActivity : AppCompatActivity() {
                     putExtra(CallRecorderService.EXTRA_OFFLINE_ONLY, chkOfflineOnly.isChecked)
                 }
             )
-            statusText.text = "Manual recording…"
+            Toast.makeText(this, "Recording…", Toast.LENGTH_SHORT).show()
+            updateUI()
         }
 
         btnStop.setOnClickListener {
@@ -95,28 +124,13 @@ class MainActivity : AppCompatActivity() {
                     action = CallRecorderService.ACTION_STOP
                 }
             )
-            statusText.text = "Stopped"
-        }
-
-        btnShizuku.setOnClickListener {
-            if (!ShizukuEnhancedRecorder.isShizukuInstalled(this)) {
-                Toast.makeText(
-                    this,
-                    "Install Shizuku-Next for both-sides (optional)",
-                    Toast.LENGTH_LONG
-                ).show()
-                return@setOnClickListener
-            }
-            enhanced.requestPermission()
-            Toast.makeText(this, "Grant in Shizuku-Next", Toast.LENGTH_LONG).show()
-            statusText.postDelayed({ updateUI() }, 1200)
+            Toast.makeText(this, "Stopped", Toast.LENGTH_SHORT).show()
+            updateUI()
         }
 
         if (!checkPermissions()) requestPermissions()
-        else {
-            maybeRequestBatteryExemption()
-            if (chkAuto.isChecked) CallMonitorService.start(this)
-        }
+        else if (chkAuto.isChecked) CallMonitorService.start(this)
+
         updateUI()
     }
 
@@ -149,10 +163,14 @@ class MainActivity : AppCompatActivity() {
         permissionLauncher.launch(needed.toTypedArray())
     }
 
-    private fun maybeRequestBatteryExemption() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
+    private fun isBatteryUnrestricted(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return true
         val pm = getSystemService(POWER_SERVICE) as PowerManager
-        if (pm.isIgnoringBatteryOptimizations(packageName)) return
+        return pm.isIgnoringBatteryOptimizations(packageName)
+    }
+
+    private fun openBatterySettings() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
         try {
             startActivity(
                 Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
@@ -160,44 +178,120 @@ class MainActivity : AppCompatActivity() {
                 }
             )
         } catch (_: Exception) {
+            try {
+                startActivity(
+                    Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+                )
+            } catch (_: Exception) {
+                Toast.makeText(this, "Open Settings → Battery → this app → Unrestricted", Toast.LENGTH_LONG).show()
+            }
         }
+    }
+
+    private fun isShizukuRunning(): Boolean {
+        return try {
+            rikka.shizuku.Shizuku.pingBinder()
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    private fun openShizukuDownload() {
+        // Maintained forks share the same API package; releases pages for install.
+        val urls = listOf(
+            "https://github.com/thedjchi/Shizuku/releases",
+            "https://shizuku.rikka.app/download/"
+        )
+        for (u in urls) {
+            try {
+                startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(u)))
+                Toast.makeText(
+                    this,
+                    "Download Shizuku or Shizuku-Next APK, install, then return here",
+                    Toast.LENGTH_LONG
+                ).show()
+                return
+            } catch (_: Exception) {
+            }
+        }
+        Toast.makeText(this, "Open browser and search: Shizuku-Next GitHub releases", Toast.LENGTH_LONG).show()
+    }
+
+    private fun openShizukuApp() {
+        val packages = arrayOf(
+            "moe.shizuku.privileged.api",
+            "moe.shizuku.manager"
+        )
+        for (pkg in packages) {
+            val launch = packageManager.getLaunchIntentForPackage(pkg)
+            if (launch != null) {
+                startActivity(launch)
+                Toast.makeText(
+                    this,
+                    "In Shizuku: Start (Wireless debugging or root), then come back",
+                    Toast.LENGTH_LONG
+                ).show()
+                return
+            }
+        }
+        Toast.makeText(this, "Shizuku not installed — use step 3", Toast.LENGTH_LONG).show()
+        openShizukuDownload()
     }
 
     private fun updateUI() {
         val offline = prefs.getBoolean(KEY_OFFLINE_ONLY, false)
         val auto = prefs.getBoolean(KEY_AUTO_RECORD, true)
-        val basicOk = checkPermissions()
+        val permsOk = checkPermissions()
+        val batteryOk = isBatteryUnrestricted()
         val installed = ShizukuEnhancedRecorder.isShizukuInstalled(this)
-        val ready = !offline && enhanced.isAvailable()
+        val running = isShizukuRunning()
+        val authorized = try {
+            running && enhanced.isAvailable()
+        } catch (_: Throwable) {
+            false
+        }
 
-        statusText.text = buildString {
-            append(if (basicOk) "Permissions: OK" else "Permissions: required")
-            append('\n')
-            append(if (auto) "Auto-record: ON (in + out)" else "Auto-record: OFF")
-            append('\n')
-            when {
-                offline -> append("Audio: Classic only (offline)")
-                ready -> append("Audio: Enhanced (Shizuku) ready")
-                installed -> append("Audio: authorize Shizuku-Next for both-sides")
-                else -> append("Audio: Classic (install Shizuku-Next optional)")
+        fun mark(ok: Boolean, label: String) =
+            (if (ok) "[OK] " else "[ ] ") + label
+
+        checklistText.text = buildString {
+            appendLine(mark(permsOk, "Permissions (mic, phone, notifications)"))
+            appendLine(mark(batteryOk, "Battery unrestricted"))
+            appendLine(mark(auto, "Auto-record enabled"))
+            if (offline) {
+                appendLine("[OK] Offline mode — Shizuku not required")
+            } else {
+                appendLine(mark(installed, "Shizuku / Shizuku-Next installed"))
+                appendLine(mark(running, "Shizuku service running"))
+                appendLine(mark(authorized, "This app authorized"))
             }
         }
 
+        statusText.text = when {
+            offline && permsOk && auto ->
+                "Ready (Classic offline auto-record)"
+            authorized && permsOk && auto ->
+                "Ready (Enhanced both-sides path available)"
+            permsOk && auto ->
+                "Ready (Classic). Optional: finish Shizuku steps for both-sides."
+            else ->
+                "Finish checklist below"
+        }
+
+        btnShizuku.isEnabled = !offline
+        btnGetShizuku.isEnabled = !offline
+        btnOpenShizuku.isEnabled = !offline
+
         infoText.text = """
-            Solid Call Recorder 2.0 – production
+            How it works
 
-            Auto-record: starts when you answer or place a call,
-            stops when the call ends. Silent (no beep).
+            • Steps 1–2 + Auto-record = works alone (often one side).
+            • Steps 3–5 = optional both-sides boost via Shizuku-Next.
+            • Shizuku cannot live inside this APK (Android rule).
+            • Silent: this app does not play record beeps.
 
-            Both-sides on modern Android still needs shell privilege
-            (Shizuku-Next). That manager cannot be shipped inside this
-            APK – Android blocks it. Without it, Classic path still
-            auto-records (often your side only).
-
-            After install: grant permissions, keep Auto-record ON,
-            allow battery unrestricted. Optional: Shizuku-Next.
-
-            Files: Android/data/…/files/CallRecordings/
+            After reboot: open Shizuku-Next once if you use Enhanced.
+            Files: Android/data/com.solid.callrecorder/files/CallRecordings/
         """.trimIndent()
     }
 
