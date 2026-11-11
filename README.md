@@ -1,39 +1,40 @@
-# Solid Call Recorder 1.3
+# Solid Call Recorder 2.0
 
-Silent hybrid call recorder. Enhanced path uses **Shizuku / Shizuku-Next** (shell). Offline mode uses Classic only (no Wi‑Fi debug).
+Production-oriented Android call recorder focused on **automatic incoming & outgoing** recording, silent operation, and best-effort both-sides capture.
 
-## Modes
+## What works out of the box (one APK)
 
-| Mode | Needs | Both sides |
-|------|--------|------------|
-| **Enhanced** | Shizuku-Next (or Shizuku) running + authorized | Best chance |
-| **Offline only** | Nothing privileged | Usually your voice only |
+- **Auto-record** in and out calls (TelephonyCallback monitor + boot restart)
+- Silent: **no beep / no announcement** from this app
+- Classic audio path without any extra app
+- Optional **Enhanced** path when Shizuku / Shizuku-Next is installed and authorized
 
-Toggle **Offline only** in the app when you do not want Shizuku / developer options.
+## What Android does not allow
 
-## Shizuku-Next (recommended)
+**Shizuku-Next cannot be embedded inside this APK** so that both-sides cellular audio works with zero other apps and zero developer setup. Shell identity (`CAPTURE_AUDIO_OUTPUT` / `VOICE_CALL`) is reserved for system or ADB-started processes. Huawei’s stock recorder is a **system/dialer** component — a normal Play-style APK cannot become that.
 
-- Same package + API as official Shizuku → this app works without code forks.
-- Prefer **Shizuku-Next** for auto-start / recovery features.
-- Start the manager once (Wireless Debugging, USB ADB, or **root**). Some Next builds can keep the service with less reliance on constant Wi‑Fi.
-- Grant this app in the manager UI.
+| Goal | Reality |
+|------|---------|
+| Auto start/stop on calls | Yes (this app) |
+| Silent (no tone from us) | Yes |
+| Both sides without any helper | Not possible on modern stock Android |
+| Both sides with Shizuku-Next | Best effort, device-dependent |
 
-We do **not** embed Shizuku-Next in the APK (size, signing, updates). Install it separately from its GitHub releases.
+## Setup
 
-## v1.3 changes
+1. Install APK, open app, grant mic + phone + notifications.
+2. Leave **Auto-record** ON.
+3. Allow unrestricted battery for the app.
+4. (Optional) Install Shizuku-Next, start it, authorize this app for better both-sides odds.
 
-- Offline-only preference (Classic path, no Shizuku)
-- Shizuku-Next detection / wording
-- Faster UserService bind timeout, leaner release APK (R8 + resource shrink)
-- Silent MIN notification, lower battery use
-- No recording beep/announcement from this app
+Recordings: `Android/data/com.solid.callrecorder/files/CallRecordings/`
 
 ## Build
 
-GitHub Actions → **Build APK** → Run workflow (manual only). Use **release** for the smallest APK.
+Actions → **Build APK** → Run workflow. Prefer **release** for minified APK.
 
 ## Legal
 
-Follow local consent laws. You are responsible for lawful use.
+Comply with local consent laws.
 
 Apache-2.0
