@@ -2,7 +2,6 @@ package com.solid.callrecorder.recorder
 
 import android.content.ContentValues
 import android.content.Context
-import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
@@ -13,32 +12,44 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * Saves under public Music/CallRecordings when possible (visible in Files app),
- * otherwise app Music folder.
+ * Reliable save path: app-specific Music/CallRecordings always works.
+ * Also tries public Music/CallRecordings when the system allows it.
  */
 object RecordingStorage {
 
     private const val TAG = "RecordingStorage"
     private const val FOLDER = "CallRecordings"
 
-    /** Directory for direct File paths (classic + enhanced). */
     fun recordingsDir(context: Context): File {
-        // Prefer shared Music so user finds files easily
-        val publicMusic = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC)
-        val publicDir = File(publicMusic, FOLDER)
+        // 1) Always-writable app folder (primary – must never fail)
+        val appMusic = context.getExternalFilesDir(Environment.DIRECTORY_MUSIC)
+            ?: context.filesDir
+        val appDir = File(appMusic, FOLDER)
+        if (!appDir.exists()) appDir.mkdirs()
+
+        // 2) Optional public Music (visible in gallery/files) when writable
         try {
+            val publicMusic = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC)
+            val publicDir = File(publicMusic, FOLDER)
             if (!publicDir.exists()) publicDir.mkdirs()
             if (publicDir.exists() && publicDir.canWrite()) {
+                // Use public if we can; still keep app dir as backup via newFile fallback
                 return publicDir
             }
         } catch (e: Exception) {
-            Log.w(TAG, "Public Music not writable: ${e.message}")
+            Log.w(TAG, "Public Music unavailable: ${e.message}")
         }
 
+        return appDir
+    }
+
+    /** Guaranteed writable directory for MediaRecorder. */
+    fun safeDir(context: Context): File {
         val appMusic = context.getExternalFilesDir(Environment.DIRECTORY_MUSIC)
-        val fallback = File(appMusic, FOLDER)
-        if (!fallback.exists()) fallback.mkdirs()
-        return fallback
+            ?: context.filesDir
+        val dir = File(appMusic, FOLDER)
+        if (!dir.exists()) dir.mkdirs()
+        return dir
     }
 
     fun newFileName(prefix: String, phoneNumber: String?, ext: String): String {
@@ -48,14 +59,12 @@ object RecordingStorage {
     }
 
     fun newFile(context: Context, prefix: String, phoneNumber: String?, ext: String): File {
-        return File(recordingsDir(context), newFileName(prefix, phoneNumber, ext))
+        // Always write to safeDir so recording never fails due to scoped storage
+        return File(safeDir(context), newFileName(prefix, phoneNumber, ext))
     }
 
-    /**
-     * Optional: index AAC/M4A into MediaStore so it appears in music/files scanners.
-     */
     fun indexInMediaStore(context: Context, file: File, mime: String = "audio/mp4") {
-        if (!file.exists()) return
+        if (!file.exists() || file.length() == 0L) return
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 val values = ContentValues().apply {
@@ -66,25 +75,11 @@ object RecordingStorage {
                     put(MediaStore.Audio.Media.DATE_ADDED, System.currentTimeMillis() / 1000)
                     put(MediaStore.Audio.Media.SIZE, file.length())
                 }
-                // Only insert if we did not already write via MediaStore
-                val existing = context.contentResolver.query(
-                    MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
-                    arrayOf(MediaStore.Audio.Media._ID),
-                    MediaStore.Audio.Media.DISPLAY_NAME + "=?",
-                    arrayOf(file.name),
-                    null
-                )
-                val has = existing?.use { it.moveToFirst() } == true
-                if (!has) {
-                    context.contentResolver.insert(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, values)
-                }
+                context.contentResolver.insert(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, values)
             } else {
                 @Suppress("DEPRECATION")
                 android.media.MediaScannerConnection.scanFile(
-                    context,
-                    arrayOf(file.absolutePath),
-                    arrayOf(mime),
-                    null
+                    context, arrayOf(file.absolutePath), arrayOf(mime), null
                 )
             }
         } catch (e: Exception) {
@@ -92,8 +87,5 @@ object RecordingStorage {
         }
     }
 
-    fun humanPath(context: Context): String {
-        val dir = recordingsDir(context)
-        return dir.absolutePath
-    }
+    fun humanPath(context: Context): String = safeDir(context).absolutePath
 }
