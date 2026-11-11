@@ -17,6 +17,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import com.solid.callrecorder.R
 import com.solid.callrecorder.recorder.ShizukuEnhancedRecorder
+import com.solid.callrecorder.service.CallMonitorService
 import com.solid.callrecorder.service.CallRecorderService
 
 class MainActivity : AppCompatActivity() {
@@ -26,6 +27,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnStop: Button
     private lateinit var btnShizuku: Button
     private lateinit var chkOfflineOnly: CheckBox
+    private lateinit var chkAuto: CheckBox
     private lateinit var infoText: TextView
 
     private val prefs by lazy { getSharedPreferences(PREFS, MODE_PRIVATE) }
@@ -37,6 +39,9 @@ class MainActivity : AppCompatActivity() {
         if (results.values.all { it }) {
             Toast.makeText(this, "Permissions OK", Toast.LENGTH_SHORT).show()
             maybeRequestBatteryExemption()
+            if (prefs.getBoolean(KEY_AUTO_RECORD, true)) {
+                CallMonitorService.start(this)
+            }
         }
         updateUI()
     }
@@ -50,12 +55,21 @@ class MainActivity : AppCompatActivity() {
         btnStop = findViewById(R.id.btnStop)
         btnShizuku = findViewById(R.id.btnShizuku)
         chkOfflineOnly = findViewById(R.id.chkOfflineOnly)
+        chkAuto = findViewById(R.id.chkAuto)
         infoText = findViewById(R.id.infoText)
 
         chkOfflineOnly.isChecked = prefs.getBoolean(KEY_OFFLINE_ONLY, false)
+        chkAuto.isChecked = prefs.getBoolean(KEY_AUTO_RECORD, true)
+
         chkOfflineOnly.setOnCheckedChangeListener { _, checked ->
             prefs.edit().putBoolean(KEY_OFFLINE_ONLY, checked).apply()
             btnShizuku.isEnabled = !checked
+            updateUI()
+        }
+        chkAuto.setOnCheckedChangeListener { _, checked ->
+            prefs.edit().putBoolean(KEY_AUTO_RECORD, checked).apply()
+            if (checked && checkPermissions()) CallMonitorService.start(this)
+            else CallMonitorService.stop(this)
             updateUI()
         }
         btnShizuku.isEnabled = !chkOfflineOnly.isChecked
@@ -72,7 +86,7 @@ class MainActivity : AppCompatActivity() {
                     putExtra(CallRecorderService.EXTRA_OFFLINE_ONLY, chkOfflineOnly.isChecked)
                 }
             )
-            statusText.text = "Recording…"
+            statusText.text = "Manual recording…"
         }
 
         btnStop.setOnClickListener {
@@ -88,17 +102,21 @@ class MainActivity : AppCompatActivity() {
             if (!ShizukuEnhancedRecorder.isShizukuInstalled(this)) {
                 Toast.makeText(
                     this,
-                    "Install Shizuku-Next (or Shizuku) from GitHub", Toast.LENGTH_LONG
+                    "Install Shizuku-Next for both-sides (optional)",
+                    Toast.LENGTH_LONG
                 ).show()
                 return@setOnClickListener
             }
             enhanced.requestPermission()
-            Toast.makeText(this, "Grant access in Shizuku-Next", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Grant in Shizuku-Next", Toast.LENGTH_LONG).show()
             statusText.postDelayed({ updateUI() }, 1200)
         }
 
         if (!checkPermissions()) requestPermissions()
-        else maybeRequestBatteryExemption()
+        else {
+            maybeRequestBatteryExemption()
+            if (chkAuto.isChecked) CallMonitorService.start(this)
+        }
         updateUI()
     }
 
@@ -147,33 +165,38 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateUI() {
         val offline = prefs.getBoolean(KEY_OFFLINE_ONLY, false)
+        val auto = prefs.getBoolean(KEY_AUTO_RECORD, true)
         val basicOk = checkPermissions()
         val installed = ShizukuEnhancedRecorder.isShizukuInstalled(this)
         val ready = !offline && enhanced.isAvailable()
 
         statusText.text = buildString {
-            append(if (basicOk) "Permissions: OK" else "Permissions: need grant")
+            append(if (basicOk) "Permissions: OK" else "Permissions: required")
+            append('\n')
+            append(if (auto) "Auto-record: ON (in + out)" else "Auto-record: OFF")
             append('\n')
             when {
-                offline -> append("Mode: Offline (Classic only – no Wi‑Fi debug needed)")
-                !installed -> append("Shizuku-Next: not installed")
-                ready -> append("Shizuku-Next: ready – both-sides path on")
-                else -> append("Shizuku-Next: start service & authorize this app")
+                offline -> append("Audio: Classic only (offline)")
+                ready -> append("Audio: Enhanced (Shizuku) ready")
+                installed -> append("Audio: authorize Shizuku-Next for both-sides")
+                else -> append("Audio: Classic (install Shizuku-Next optional)")
             }
         }
 
         infoText.text = """
-            Solid Call Recorder 1.3 – silent, lean
+            Solid Call Recorder 2.0 – production
 
-            Recommended: Shizuku-Next (same API as Shizuku)
-            • Start once (Wireless Debugging, USB, or root)
-            • Many Next builds can keep service without constant Wi‑Fi
-            • Authorize this app, then uncheck Offline only
+            Auto-record: starts when you answer or place a call,
+            stops when the call ends. Silent (no beep).
 
-            Offline only: no Shizuku, no developer mode required
-            → Classic mic path (often one side). Works anywhere.
+            Both-sides on modern Android still needs shell privilege
+            (Shizuku-Next). That manager cannot be shipped inside this
+            APK – Android blocks it. Without it, Classic path still
+            auto-records (often your side only).
 
-            App stays silent (no beep). Notification is minimal.
+            After install: grant permissions, keep Auto-record ON,
+            allow battery unrestricted. Optional: Shizuku-Next.
+
             Files: Android/data/…/files/CallRecordings/
         """.trimIndent()
     }
@@ -181,5 +204,6 @@ class MainActivity : AppCompatActivity() {
     companion object {
         const val PREFS = "solid_prefs"
         const val KEY_OFFLINE_ONLY = "offline_only"
+        const val KEY_AUTO_RECORD = "auto_record"
     }
 }
