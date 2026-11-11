@@ -11,12 +11,10 @@ android {
         applicationId = "com.solid.callrecorder"
         minSdk = 26
         targetSdk = 35
-        versionCode = 7
-        versionName = "2.0.2"
+        versionCode = 8
+        versionName = "2.0.3"
     }
 
-    // Unsigned release APKs show "package invalid" on devices.
-    // For this personal CI project, release is signed with the debug key.
     buildTypes {
         debug {
             isMinifyEnabled = false
