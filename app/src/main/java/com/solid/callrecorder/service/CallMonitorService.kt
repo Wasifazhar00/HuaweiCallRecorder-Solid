@@ -21,10 +21,6 @@ import com.solid.callrecorder.ui.MainActivity
 import java.util.concurrent.Executor
 import java.util.concurrent.atomic.AtomicBoolean
 
-/**
- * Keeps a silent FGS alive, listens for call state, and records on OFFHOOK
- * directly (no second service) so auto-record is reliable.
- */
 class CallMonitorService : Service() {
 
     private var telephonyManager: TelephonyManager? = null
@@ -38,7 +34,7 @@ class CallMonitorService : Service() {
         super.onCreate()
         recorder = CallRecorder(this)
         if (!startAsForegroundSafe()) {
-            Log.e(TAG, "Could not enter foreground – auto-record disabled")
+            Log.e(TAG, "Could not enter foreground")
             stopSelf()
             return
         }
@@ -47,14 +43,6 @@ class CallMonitorService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action) {
-            ACTION_ENSURE -> {
-                if (!autoEnabled()) {
-                    stopSelf()
-                    return START_NOT_STICKY
-                }
-            }
-        }
         if (!autoEnabled()) {
             stopSelf()
             return START_NOT_STICKY
@@ -73,10 +61,7 @@ class CallMonitorService : Service() {
             attempts += ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
             attempts += ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
         }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            attempts += 0 // plain
-        }
-
+        attempts += 0
         for (type in attempts.distinct()) {
             try {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && type != 0) {
@@ -84,17 +69,16 @@ class CallMonitorService : Service() {
                 } else {
                     startForeground(NOTIF_ID, n)
                 }
-                Log.i(TAG, "Foreground OK type=$type")
                 return true
             } catch (e: Exception) {
-                Log.w(TAG, "startForeground type=$type failed: ${e.message}")
+                Log.w(TAG, "FGS type=$type fail: ${e.message}")
             }
         }
         return try {
             startForeground(NOTIF_ID, n)
             true
         } catch (e: Exception) {
-            Log.e(TAG, "startForeground final fail", e)
+            Log.e(TAG, "FGS fail", e)
             false
         }
     }
@@ -119,8 +103,8 @@ class CallMonitorService : Service() {
 
     private fun updateNotif(text: String) {
         try {
-            val nm = getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager
-            nm.notify(NOTIF_ID, buildMonitorNotification(text))
+            (getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager)
+                .notify(NOTIF_ID, buildMonitorNotification(text))
         } catch (_: Exception) {
         }
     }
@@ -136,9 +120,8 @@ class CallMonitorService : Service() {
             callback = cb
             try {
                 telephonyManager?.registerTelephonyCallback(mainExecutorCompat(), cb)
-                Log.i(TAG, "TelephonyCallback registered")
             } catch (e: Exception) {
-                Log.e(TAG, "registerTelephonyCallback failed", e)
+                Log.e(TAG, "TelephonyCallback", e)
             }
         } else {
             @Suppress("DEPRECATION")
@@ -151,86 +134,66 @@ class CallMonitorService : Service() {
             legacyListener = listener
             @Suppress("DEPRECATION")
             telephonyManager?.listen(listener, PhoneStateListener.LISTEN_CALL_STATE)
-            Log.i(TAG, "PhoneStateListener registered")
         }
-
-        // Sync current state (already in call)
         try {
             @Suppress("DEPRECATION")
-            val state = telephonyManager?.callState ?: TelephonyManager.CALL_STATE_IDLE
-            handleState(state, null)
+            handleState(telephonyManager?.callState ?: TelephonyManager.CALL_STATE_IDLE, null)
         } catch (_: Exception) {
         }
     }
 
     private fun mainExecutorCompat(): Executor {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            mainExecutor
-        } else {
-            Executor { mainHandler.post(it) }
-        }
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) mainExecutor
+        else Executor { mainHandler.post(it) }
     }
 
     private fun handleState(state: Int, number: String?) {
         if (!autoEnabled()) return
-        Log.i(TAG, "callState=$state number=$number")
+        Log.i(TAG, "callState=$state")
         when (state) {
             TelephonyManager.CALL_STATE_OFFHOOK -> {
-                if (inCall.compareAndSet(false, true)) {
-                    startRecordingNow(number)
-                }
+                if (inCall.compareAndSet(false, true)) startRecordingNow(number)
             }
             TelephonyManager.CALL_STATE_IDLE -> {
-                if (inCall.compareAndSet(true, false)) {
-                    stopRecordingNow()
-                }
-            }
-            TelephonyManager.CALL_STATE_RINGING -> {
-                Log.i(TAG, "RINGING – wait for answer")
+                if (inCall.compareAndSet(true, false)) stopRecordingNow()
             }
         }
     }
 
     private fun startRecordingNow(number: String?) {
-        Log.i(TAG, "OFFHOOK → start recording")
-        // Small delay so audio routing is ready after answer/dial connect
+        // Wait for call audio path to settle (fixes many silent files)
         mainHandler.postDelayed({
             if (!inCall.get()) return@postDelayed
             val ok = try {
                 recorder?.start(number) == true
             } catch (e: Exception) {
-                Log.e(TAG, "recorder.start error", e)
+                Log.e(TAG, "start", e)
                 false
             }
             if (ok) {
                 updateNotif("Recording call…")
-                Log.i(TAG, "Auto recording started")
             } else {
-                Log.e(TAG, "Auto recording FAILED to start")
-                updateNotif("Auto-record on – start failed (check mic permission)")
+                updateNotif("Record start failed")
                 inCall.set(false)
             }
-        }, 800)
+        }, 1500)
     }
 
     private fun stopRecordingNow() {
-        Log.i(TAG, "IDLE → stop recording")
         mainHandler.removeCallbacksAndMessages(null)
         val file = try {
             recorder?.stop()
         } catch (e: Exception) {
-            Log.e(TAG, "recorder.stop error", e)
+            Log.e(TAG, "stop", e)
             null
         }
-        if (file != null) {
-            Log.i(TAG, "Saved ${file.absolutePath}")
-            updateNotif("Saved ${file.name}")
-            mainHandler.postDelayed({
-                updateNotif("Auto-record on – waiting for calls")
-            }, 4000)
-        } else {
+        updateNotif(
+            if (file != null) "Saved ${file.name}"
+            else "Auto-record on – waiting for calls"
+        )
+        mainHandler.postDelayed({
             updateNotif("Auto-record on – waiting for calls")
-        }
+        }, 3500)
     }
 
     override fun onDestroy() {
@@ -250,8 +213,6 @@ class CallMonitorService : Service() {
             }
         } catch (_: Exception) {
         }
-        callback = null
-        legacyListener = null
         super.onDestroy()
     }
 
@@ -266,13 +227,11 @@ class CallMonitorService : Service() {
             val prefs = context.getSharedPreferences(MainActivity.PREFS, MODE_PRIVATE)
             if (!prefs.getBoolean(MainActivity.KEY_AUTO_RECORD, true)) return
             try {
-                val i = Intent(context, CallMonitorService::class.java).apply {
-                    action = ACTION_ENSURE
-                }
-                context.startForegroundService(i)
-                Log.i(TAG, "startForegroundService requested")
+                context.startForegroundService(
+                    Intent(context, CallMonitorService::class.java).apply { action = ACTION_ENSURE }
+                )
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to start monitor", e)
+                Log.e(TAG, "start monitor", e)
             }
         }
 
