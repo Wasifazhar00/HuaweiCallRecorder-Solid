@@ -1,6 +1,5 @@
 name: Build APK
 
-# Manual trigger only
 on:
   workflow_dispatch:
     inputs:
@@ -56,6 +55,19 @@ jobs:
             "platforms;android-35" \
             "build-tools;35.0.0"
 
+      - name: Ensure Android debug keystore
+        run: |
+          mkdir -p "$HOME/.android"
+          if [ ! -f "$HOME/.android/debug.keystore" ]; then
+            keytool -genkeypair -v \
+              -keystore "$HOME/.android/debug.keystore" \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
@@ -75,6 +87,10 @@ jobs:
           else
             ./gradlew assembleDebug --stacktrace
           fi
+
+      - name: List APK outputs
+        if: success()
+        run: find app/build/outputs/apk -type f -name '*.apk' -ls
 
       - name: Upload APK
         if: success()
