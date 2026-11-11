@@ -44,9 +44,7 @@ class MainActivity : AppCompatActivity() {
     ) { results ->
         if (results.values.all { it }) {
             Toast.makeText(this, "Permissions OK", Toast.LENGTH_SHORT).show()
-            if (prefs.getBoolean(KEY_AUTO_RECORD, true)) {
-                CallMonitorService.start(this)
-            }
+            if (prefs.getBoolean(KEY_AUTO_RECORD, true)) CallMonitorService.start(this)
         }
         updateUI()
     }
@@ -71,13 +69,13 @@ class MainActivity : AppCompatActivity() {
         chkOfflineOnly.isChecked = prefs.getBoolean(KEY_OFFLINE_ONLY, false)
         chkAuto.isChecked = prefs.getBoolean(KEY_AUTO_RECORD, true)
 
-        chkOfflineOnly.setOnCheckedChangeListener { _, checked ->
-            prefs.edit().putBoolean(KEY_OFFLINE_ONLY, checked).apply()
+        chkOfflineOnly.setOnCheckedChangeListener { _, c ->
+            prefs.edit().putBoolean(KEY_OFFLINE_ONLY, c).apply()
             updateUI()
         }
-        chkAuto.setOnCheckedChangeListener { _, checked ->
-            prefs.edit().putBoolean(KEY_AUTO_RECORD, checked).apply()
-            if (checked && checkPermissions()) CallMonitorService.start(this)
+        chkAuto.setOnCheckedChangeListener { _, c ->
+            prefs.edit().putBoolean(KEY_AUTO_RECORD, c).apply()
+            if (c && checkPermissions()) CallMonitorService.start(this)
             else CallMonitorService.stop(this)
             updateUI()
         }
@@ -89,17 +87,15 @@ class MainActivity : AppCompatActivity() {
 
         btnShizuku.setOnClickListener {
             if (!ShizukuEnhancedRecorder.isShizukuInstalled(this)) {
-                Toast.makeText(this, "Install Shizuku-Next first (step 3)", Toast.LENGTH_LONG).show()
                 openShizukuDownload()
                 return@setOnClickListener
             }
             if (!isShizukuRunning()) {
-                Toast.makeText(this, "Start Shizuku-Next first (step 4)", Toast.LENGTH_LONG).show()
                 openShizukuApp()
                 return@setOnClickListener
             }
             enhanced.requestPermission()
-            Toast.makeText(this, "Grant Solid Call Recorder in Shizuku-Next", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Grant access in Shizuku", Toast.LENGTH_LONG).show()
             statusText.postDelayed({ updateUI() }, 1500)
         }
 
@@ -115,8 +111,6 @@ class MainActivity : AppCompatActivity() {
                     putExtra(CallRecorderService.EXTRA_OFFLINE_ONLY, chkOfflineOnly.isChecked)
                 }
             )
-            Toast.makeText(this, "Recording…", Toast.LENGTH_SHORT).show()
-            updateUI()
         }
 
         btnStop.setOnClickListener {
@@ -125,13 +119,10 @@ class MainActivity : AppCompatActivity() {
                     action = CallRecorderService.ACTION_STOP
                 }
             )
-            Toast.makeText(this, "Stopped", Toast.LENGTH_SHORT).show()
-            updateUI()
         }
 
         if (!checkPermissions()) requestPermissions()
         else if (chkAuto.isChecked) CallMonitorService.start(this)
-
         updateUI()
     }
 
@@ -166,8 +157,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun isBatteryUnrestricted(): Boolean {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return true
-        val pm = getSystemService(POWER_SERVICE) as PowerManager
-        return pm.isIgnoringBatteryOptimizations(packageName)
+        return (getSystemService(POWER_SERVICE) as PowerManager)
+            .isIgnoringBatteryOptimizations(packageName)
     }
 
     private fun openBatterySettings() {
@@ -182,41 +173,32 @@ class MainActivity : AppCompatActivity() {
             try {
                 startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
             } catch (_: Exception) {
-                Toast.makeText(this, "Settings → Battery → this app → Unrestricted", Toast.LENGTH_LONG).show()
             }
         }
     }
 
-    private fun isShizukuRunning(): Boolean {
-        return try {
-            rikka.shizuku.Shizuku.pingBinder()
-        } catch (_: Throwable) {
-            false
-        }
+    private fun isShizukuRunning(): Boolean = try {
+        rikka.shizuku.Shizuku.pingBinder()
+    } catch (_: Throwable) {
+        false
     }
 
     private fun openShizukuDownload() {
-        val urls = listOf(
-            "https://github.com/thedjchi/Shizuku/releases",
-            "https://shizuku.rikka.app/download/"
-        )
-        for (u in urls) {
-            try {
-                startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(u)))
-                Toast.makeText(this, "Download Shizuku / Shizuku-Next, install, return here", Toast.LENGTH_LONG).show()
-                return
-            } catch (_: Exception) {
-            }
+        try {
+            startActivity(
+                Intent(
+                    Intent.ACTION_VIEW,
+                    Uri.parse("https://github.com/thedjchi/Shizuku/releases")
+                )
+            )
+        } catch (_: Exception) {
         }
     }
 
     private fun openShizukuApp() {
-        val packages = arrayOf("moe.shizuku.privileged.api", "moe.shizuku.manager")
-        for (pkg in packages) {
-            val launch = packageManager.getLaunchIntentForPackage(pkg)
-            if (launch != null) {
-                startActivity(launch)
-                Toast.makeText(this, "Start Shizuku, then return", Toast.LENGTH_LONG).show()
+        for (pkg in arrayOf("moe.shizuku.privileged.api", "moe.shizuku.manager")) {
+            packageManager.getLaunchIntentForPackage(pkg)?.let {
+                startActivity(it)
                 return
             }
         }
@@ -239,42 +221,35 @@ class MainActivity : AppCompatActivity() {
         fun mark(ok: Boolean, label: String) = (if (ok) "[OK] " else "[ ] ") + label
 
         checklistText.text = buildString {
-            appendLine(mark(permsOk, "Permissions (mic, phone, notifications)"))
+            appendLine(mark(permsOk, "Permissions"))
             appendLine(mark(batteryOk, "Battery unrestricted"))
-            appendLine(mark(auto, "Auto-record enabled"))
-            if (offline) {
-                appendLine("[OK] Offline mode — Shizuku not required")
-            } else {
-                appendLine(mark(installed, "Shizuku / Shizuku-Next installed"))
-                appendLine(mark(running, "Shizuku service running"))
-                appendLine(mark(authorized, "This app authorized"))
+            appendLine(mark(auto, "Auto-record"))
+            if (!offline) {
+                appendLine(mark(installed, "Shizuku installed"))
+                appendLine(mark(running, "Shizuku running"))
+                appendLine(mark(authorized, "Authorized"))
             }
         }
 
         statusText.text = when {
-            offline && permsOk && auto -> "Ready (Classic offline auto-record)"
-            authorized && permsOk && auto -> "Ready (Enhanced both-sides available)"
-            permsOk && auto -> "Ready (Classic). Optional: Shizuku for both-sides."
-            else -> "Finish checklist below"
+            permsOk && auto -> "Ready – auto-record on"
+            else -> "Finish checklist"
         }
 
         btnShizuku.isEnabled = !offline
         btnGetShizuku.isEnabled = !offline
         btnOpenShizuku.isEnabled = !offline
 
-        val path = RecordingStorage.humanPath(this)
         infoText.text = """
-            Storage and format
+            Files folder:
+            ${RecordingStorage.humanPath(this)}
 
-            Folder: $path
-            (usually Internal storage / Music / CallRecordings)
+            Look in: Internal storage → Recordings → CallRecorder
 
-            Classic: M4A AAC mono 16 kHz 64 kbps
-            (~0.5 MB per minute, clear speech, small size)
+            Format: M4A AAC 44.1 kHz 96 kbps (clearer speech)
 
-            Enhanced: 16 kHz mono WAV when Shizuku is active
-
-            Silent: no beep from this app.
+            Tip: speakerphone often improves offline capture.
+            Both-sides still best with Shizuku when available.
         """.trimIndent()
     }
 
