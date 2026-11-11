@@ -17,8 +17,8 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 /**
- * Enhanced path: binds Shizuku UserService (shell UID) and drives privileged capture.
- * After start(), call [lastStrategyLabel] to learn which source succeeded.
+ * Enhanced path via Shizuku / Shizuku-Next UserService (shell UID).
+ * Same binder API works with official Shizuku and Shizuku-Next.
  */
 class ShizukuEnhancedRecorder(private val context: Context) : EnhancedRecorder {
 
@@ -31,32 +31,16 @@ class ShizukuEnhancedRecorder(private val context: Context) : EnhancedRecorder {
         ComponentName(context.packageName, ShellRecorderUserService::class.java.name)
     )
         .daemon(false)
-        .processNameSuffix("shellrecorder")
+        .processNameSuffix("shellrec")
         .debuggable(false)
-        .version(2)
-
-    private val connection = object : ServiceConnection {
-        override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
-            if (binder != null && binder.pingBinder()) {
-                service = IShellRecorder.Stub.asInterface(binder)
-                bound = true
-                Log.i(TAG, "UserService connected")
-            }
-        }
-
-        override fun onServiceDisconnected(name: ComponentName?) {
-            service = null
-            bound = false
-            Log.w(TAG, "UserService disconnected")
-        }
-    }
+        .version(3)
 
     private val binderReceivedListener = Shizuku.OnBinderReceivedListener {
-        Log.i(TAG, "Shizuku binder received")
+        Log.i(TAG, "Shizuku binder ready")
     }
 
     private val binderDeadListener = Shizuku.OnBinderDeadListener {
-        Log.w(TAG, "Shizuku binder died")
+        Log.w(TAG, "Shizuku binder dead")
         service = null
         bound = false
     }
@@ -65,16 +49,16 @@ class ShizukuEnhancedRecorder(private val context: Context) : EnhancedRecorder {
         try {
             Shizuku.addBinderReceivedListenerSticky(binderReceivedListener)
             Shizuku.addBinderDeadListener(binderDeadListener)
-        } catch (e: Throwable) {
-            Log.w(TAG, "Shizuku not present", e)
+        } catch (_: Throwable) {
+            // Manager not installed – offline / classic only
         }
     }
 
     override fun isAvailable(): Boolean {
         return try {
             Shizuku.pingBinder() &&
-                    Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
-        } catch (e: Throwable) {
+                Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
+        } catch (_: Throwable) {
             false
         }
     }
@@ -89,11 +73,17 @@ class ShizukuEnhancedRecorder(private val context: Context) : EnhancedRecorder {
         }
     }
 
-    /** Label of the strategy that succeeded on the last start(), or null. */
     fun lastStrategyLabel(): String? = lastStrategy
 
     private fun ensureBound(): Boolean {
-        if (bound && service != null) return true
+        if (bound && service != null) {
+            try {
+                if (service!!.asBinder().pingBinder()) return true
+            } catch (_: Exception) {
+                service = null
+                bound = false
+            }
+        }
         if (!isAvailable()) return false
 
         val latch = CountDownLatch(1)
@@ -102,7 +92,6 @@ class ShizukuEnhancedRecorder(private val context: Context) : EnhancedRecorder {
                 if (binder != null && binder.pingBinder()) {
                     service = IShellRecorder.Stub.asInterface(binder)
                     bound = true
-                    Log.i(TAG, "UserService bound successfully")
                 }
                 latch.countDown()
             }
@@ -115,49 +104,41 @@ class ShizukuEnhancedRecorder(private val context: Context) : EnhancedRecorder {
 
         return try {
             Shizuku.bindUserService(userServiceArgs, conn)
-            val ok = latch.await(5, TimeUnit.SECONDS) && bound
-            if (!ok) Log.w(TAG, "bindUserService timed out or failed")
+            // 3s is enough when service is warm; fails fast offline
+            val ok = latch.await(3, TimeUnit.SECONDS) && bound
+            if (!ok) Log.w(TAG, "UserService bind timeout")
             ok
         } catch (e: Throwable) {
-            Log.e(TAG, "bindUserService error", e)
+            Log.e(TAG, "bindUserService", e)
             false
         }
     }
 
     override fun start(phoneNumber: String?): Boolean {
         lastStrategy = null
-        if (!isAvailable()) {
-            Log.w(TAG, "Shizuku not available / not authorized")
-            return false
-        }
-        if (!ensureBound()) {
-            Log.w(TAG, "Could not bind privileged UserService")
-            return false
-        }
+        if (!isAvailable()) return false
+        if (!ensureBound()) return false
 
-        val recordingsDir = File(context.getExternalFilesDir(null), "CallRecordings")
-        if (!recordingsDir.exists()) recordingsDir.mkdirs()
+        val dir = File(context.getExternalFilesDir(null), "CallRecordings")
+        if (!dir.exists()) dir.mkdirs()
 
-        val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-        val safeNumber = phoneNumber?.replace(Regex("[^0-9+]"), "") ?: "unknown"
-        val outFile = File(recordingsDir, "Enhanced_${safeNumber}_$timestamp.wav")
-        currentOutput = outFile
+        val ts = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        val num = phoneNumber?.replace(Regex("[^0-9+]"), "") ?: "unknown"
+        val out = File(dir, "E_${num}_$ts.wav")
+        currentOutput = out
 
         return try {
-            val started = service?.start(outFile.absolutePath, phoneNumber) == true
+            val started = service?.start(out.absolutePath, phoneNumber) == true
             if (started) {
                 lastStrategy = try {
                     service?.activeStrategy?.takeIf { it.isNotBlank() }
                 } catch (_: Exception) { null }
-                val status = try { service?.status } catch (_: Exception) { null }
-                Log.i(TAG, "Enhanced started → ${outFile.name} strategy=$lastStrategy status=$status")
             } else {
-                Log.w(TAG, "UserService.start returned false (all sources failed/silent)")
                 currentOutput = null
             }
             started
         } catch (e: Exception) {
-            Log.e(TAG, "start via UserService failed", e)
+            Log.e(TAG, "start failed", e)
             currentOutput = null
             false
         }
@@ -168,18 +149,20 @@ class ShizukuEnhancedRecorder(private val context: Context) : EnhancedRecorder {
             val path = service?.stop()
             val file = path?.let { File(it) } ?: currentOutput
             currentOutput = null
-            Log.i(TAG, "Enhanced stopped → ${file?.absolutePath} strategy=$lastStrategy")
             file
         } catch (e: Exception) {
             Log.e(TAG, "stop failed", e)
-            currentOutput
+            currentOutput.also { currentOutput = null }
         }
     }
 
     fun release() {
         try {
             if (bound) {
-                Shizuku.unbindUserService(userServiceArgs, connection, true)
+                Shizuku.unbindUserService(userServiceArgs, object : ServiceConnection {
+                    override fun onServiceConnected(n: ComponentName?, b: IBinder?) {}
+                    override fun onServiceDisconnected(n: ComponentName?) {}
+                }, true)
             }
         } catch (_: Throwable) {}
         try {
@@ -192,19 +175,32 @@ class ShizukuEnhancedRecorder(private val context: Context) : EnhancedRecorder {
     }
 
     companion object {
-        private const val TAG = "ShizukuEnhancedRecorder"
+        private const val TAG = "ShizukuEnhanced"
+
+        /** Official Shizuku + Shizuku-Next share this package id. */
+        private val MANAGER_PACKAGES = arrayOf(
+            "moe.shizuku.privileged.api", // official + Shizuku-Next
+            "moe.shizuku.manager"
+        )
 
         fun isShizukuInstalled(context: Context): Boolean {
-            return try {
-                context.packageManager.getPackageInfo("moe.shizuku.privileged.api", 0)
-                true
-            } catch (_: PackageManager.NameNotFoundException) {
+            val pm = context.packageManager
+            for (pkg in MANAGER_PACKAGES) {
                 try {
-                    context.packageManager.getPackageInfo("moe.shizuku.manager", 0)
-                    true
+                    pm.getPackageInfo(pkg, 0)
+                    return true
                 } catch (_: PackageManager.NameNotFoundException) {
-                    false
                 }
+            }
+            return false
+        }
+
+        /** Best-effort label for UI (Next vs stock not always distinguishable). */
+        fun managerLabel(context: Context): String {
+            return if (isShizukuInstalled(context)) {
+                "Shizuku / Shizuku-Next"
+            } else {
+                "Not installed"
             }
         }
     }
