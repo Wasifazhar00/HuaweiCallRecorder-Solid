@@ -5,13 +5,10 @@ import android.media.MediaRecorder
 import android.os.Build
 import android.util.Log
 import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 
 /**
- * Classic MediaRecorder path (no tones, no announcement).
- * For true both-sides use Enhanced (Shizuku) path.
+ * Classic MediaRecorder – AAC M4A, voice-optimized (small + clear).
+ * No tones / announcements.
  */
 class CallRecorder(private val context: Context) {
 
@@ -23,12 +20,8 @@ class CallRecorder(private val context: Context) {
     fun start(phoneNumber: String? = null): Boolean {
         if (isRecording) return false
 
-        val recordingsDir = File(context.getExternalFilesDir(null), "CallRecordings")
-        if (!recordingsDir.exists()) recordingsDir.mkdirs()
-
-        val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-        val safeNumber = phoneNumber?.replace(Regex("[^0-9+]"), "") ?: "unknown"
-        outputFile = File(recordingsDir, "Call_${safeNumber}_$timestamp.m4a")
+        // Voice: 16 kHz mono AAC ~64 kbps ≈ 0.5 MB per minute, clearer than AMR
+        outputFile = RecordingStorage.newFile(context, "Call", phoneNumber, "m4a")
 
         return try {
             mediaRecorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -38,13 +31,13 @@ class CallRecorder(private val context: Context) {
                 MediaRecorder()
             }.apply {
                 val source = AudioSourceSelector.getBestSource()
-                Log.i(TAG, "Audio source: ${AudioSourceSelector.getSourceName(source)}")
+                Log.i(TAG, "source=${AudioSourceSelector.getSourceName(source)} file=${outputFile!!.name}")
                 setAudioSource(source)
                 setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
                 setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-                // 96 kbps is enough for voice and uses less CPU/battery than 128k
-                setAudioEncodingBitRate(96_000)
+                setAudioChannels(1)
                 setAudioSamplingRate(16_000)
+                setAudioEncodingBitRate(64_000)
                 setOutputFile(outputFile!!.absolutePath)
                 prepare()
                 start()
@@ -67,7 +60,10 @@ class CallRecorder(private val context: Context) {
             }
             mediaRecorder = null
             isRecording = false
-            outputFile
+            outputFile?.also {
+                RecordingStorage.indexInMediaStore(context, it, "audio/mp4")
+                Log.i(TAG, "Saved ${it.absolutePath} size=${it.length()}")
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Stop failed", e)
             release()
@@ -76,7 +72,10 @@ class CallRecorder(private val context: Context) {
     }
 
     private fun release() {
-        try { mediaRecorder?.release() } catch (_: Exception) {}
+        try {
+            mediaRecorder?.release()
+        } catch (_: Exception) {
+        }
         mediaRecorder = null
         isRecording = false
     }
