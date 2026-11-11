@@ -11,10 +11,12 @@ android {
         applicationId = "com.solid.callrecorder"
         minSdk = 26
         targetSdk = 35
-        versionCode = 6
-        versionName = "2.0.1"
+        versionCode = 7
+        versionName = "2.0.2"
     }
 
+    // Unsigned release APKs show "package invalid" on devices.
+    // For this personal CI project, release is signed with the debug key.
     buildTypes {
         debug {
             isMinifyEnabled = false
@@ -22,6 +24,7 @@ android {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
+            signingConfig = signingConfigs.getByName("debug")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
