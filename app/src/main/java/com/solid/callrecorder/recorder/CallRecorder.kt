@@ -7,8 +7,8 @@ import android.util.Log
 import java.io.File
 
 /**
- * Classic MediaRecorder – AAC M4A, voice-optimized (small + clear).
- * No tones / announcements.
+ * Classic MediaRecorder with source fallback ladder.
+ * Always writes to app-accessible Music/CallRecordings.
  */
 class CallRecorder(private val context: Context) {
 
@@ -20,33 +20,59 @@ class CallRecorder(private val context: Context) {
     fun start(phoneNumber: String? = null): Boolean {
         if (isRecording) return false
 
-        // Voice: 16 kHz mono AAC ~64 kbps ≈ 0.5 MB per minute, clearer than AMR
         outputFile = RecordingStorage.newFile(context, "Call", phoneNumber, "m4a")
+        Log.i(TAG, "Will write to ${outputFile!!.absolutePath}")
 
+        val sources = listOf(
+            MediaRecorder.AudioSource.MIC,
+            MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+            MediaRecorder.AudioSource.VOICE_RECOGNITION,
+            MediaRecorder.AudioSource.CAMCORDER,
+            MediaRecorder.AudioSource.VOICE_CALL
+        )
+
+        for (source in sources) {
+            if (tryStart(source)) {
+                isRecording = true
+                Log.i(TAG, "Recording with source=$source file=${outputFile!!.name}")
+                return true
+            }
+            // delete empty failed file and recreate path
+            try {
+                outputFile?.delete()
+            } catch (_: Exception) {
+            }
+            outputFile = RecordingStorage.newFile(context, "Call", phoneNumber, "m4a")
+        }
+
+        Log.e(TAG, "All audio sources failed")
+        outputFile = null
+        return false
+    }
+
+    private fun tryStart(source: Int): Boolean {
+        releaseRecorderOnly()
         return try {
-            mediaRecorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val mr = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 MediaRecorder(context)
             } else {
                 @Suppress("DEPRECATION")
                 MediaRecorder()
-            }.apply {
-                val source = AudioSourceSelector.getBestSource()
-                Log.i(TAG, "source=${AudioSourceSelector.getSourceName(source)} file=${outputFile!!.name}")
-                setAudioSource(source)
-                setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
-                setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-                setAudioChannels(1)
-                setAudioSamplingRate(16_000)
-                setAudioEncodingBitRate(64_000)
-                setOutputFile(outputFile!!.absolutePath)
-                prepare()
-                start()
             }
-            isRecording = true
+            mediaRecorder = mr
+            mr.setAudioSource(source)
+            mr.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+            mr.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+            mr.setAudioChannels(1)
+            mr.setAudioSamplingRate(16_000)
+            mr.setAudioEncodingBitRate(64_000)
+            mr.setOutputFile(outputFile!!.absolutePath)
+            mr.prepare()
+            mr.start()
             true
         } catch (e: Exception) {
-            Log.e(TAG, "Start failed", e)
-            release()
+            Log.w(TAG, "source=$source failed: ${e.message}")
+            releaseRecorderOnly()
             false
         }
     }
@@ -55,14 +81,25 @@ class CallRecorder(private val context: Context) {
         if (!isRecording) return null
         return try {
             mediaRecorder?.apply {
-                stop()
+                try {
+                    stop()
+                } catch (e: Exception) {
+                    Log.w(TAG, "stop(): ${e.message}")
+                }
                 release()
             }
             mediaRecorder = null
             isRecording = false
-            outputFile?.also {
-                RecordingStorage.indexInMediaStore(context, it, "audio/mp4")
-                Log.i(TAG, "Saved ${it.absolutePath} size=${it.length()}")
+            val file = outputFile
+            outputFile = null
+            if (file != null && file.exists() && file.length() > 0) {
+                RecordingStorage.indexInMediaStore(context, file, "audio/mp4")
+                Log.i(TAG, "Saved ${file.absolutePath} (${file.length()} bytes)")
+                file
+            } else {
+                Log.w(TAG, "Empty or missing file after stop")
+                file?.delete()
+                null
             }
         } catch (e: Exception) {
             Log.e(TAG, "Stop failed", e)
@@ -71,12 +108,16 @@ class CallRecorder(private val context: Context) {
         }
     }
 
-    private fun release() {
+    private fun releaseRecorderOnly() {
         try {
             mediaRecorder?.release()
         } catch (_: Exception) {
         }
         mediaRecorder = null
+    }
+
+    private fun release() {
+        releaseRecorderOnly()
         isRecording = false
     }
 
