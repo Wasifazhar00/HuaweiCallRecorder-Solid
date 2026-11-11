@@ -16,6 +16,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import com.solid.callrecorder.R
+import com.solid.callrecorder.recorder.RecordingStorage
 import com.solid.callrecorder.recorder.ShizukuEnhancedRecorder
 import com.solid.callrecorder.service.CallMonitorService
 import com.solid.callrecorder.service.CallRecorderService
@@ -179,11 +180,9 @@ class MainActivity : AppCompatActivity() {
             )
         } catch (_: Exception) {
             try {
-                startActivity(
-                    Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
-                )
+                startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
             } catch (_: Exception) {
-                Toast.makeText(this, "Open Settings → Battery → this app → Unrestricted", Toast.LENGTH_LONG).show()
+                Toast.makeText(this, "Settings → Battery → this app → Unrestricted", Toast.LENGTH_LONG).show()
             }
         }
     }
@@ -197,7 +196,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun openShizukuDownload() {
-        // Maintained forks share the same API package; releases pages for install.
         val urls = listOf(
             "https://github.com/thedjchi/Shizuku/releases",
             "https://shizuku.rikka.app/download/"
@@ -205,36 +203,23 @@ class MainActivity : AppCompatActivity() {
         for (u in urls) {
             try {
                 startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(u)))
-                Toast.makeText(
-                    this,
-                    "Download Shizuku or Shizuku-Next APK, install, then return here",
-                    Toast.LENGTH_LONG
-                ).show()
+                Toast.makeText(this, "Download Shizuku / Shizuku-Next, install, return here", Toast.LENGTH_LONG).show()
                 return
             } catch (_: Exception) {
             }
         }
-        Toast.makeText(this, "Open browser and search: Shizuku-Next GitHub releases", Toast.LENGTH_LONG).show()
     }
 
     private fun openShizukuApp() {
-        val packages = arrayOf(
-            "moe.shizuku.privileged.api",
-            "moe.shizuku.manager"
-        )
+        val packages = arrayOf("moe.shizuku.privileged.api", "moe.shizuku.manager")
         for (pkg in packages) {
             val launch = packageManager.getLaunchIntentForPackage(pkg)
             if (launch != null) {
                 startActivity(launch)
-                Toast.makeText(
-                    this,
-                    "In Shizuku: Start (Wireless debugging or root), then come back",
-                    Toast.LENGTH_LONG
-                ).show()
+                Toast.makeText(this, "Start Shizuku, then return", Toast.LENGTH_LONG).show()
                 return
             }
         }
-        Toast.makeText(this, "Shizuku not installed — use step 3", Toast.LENGTH_LONG).show()
         openShizukuDownload()
     }
 
@@ -251,8 +236,7 @@ class MainActivity : AppCompatActivity() {
             false
         }
 
-        fun mark(ok: Boolean, label: String) =
-            (if (ok) "[OK] " else "[ ] ") + label
+        fun mark(ok: Boolean, label: String) = (if (ok) "[OK] " else "[ ] ") + label
 
         checklistText.text = buildString {
             appendLine(mark(permsOk, "Permissions (mic, phone, notifications)"))
@@ -268,30 +252,29 @@ class MainActivity : AppCompatActivity() {
         }
 
         statusText.text = when {
-            offline && permsOk && auto ->
-                "Ready (Classic offline auto-record)"
-            authorized && permsOk && auto ->
-                "Ready (Enhanced both-sides path available)"
-            permsOk && auto ->
-                "Ready (Classic). Optional: finish Shizuku steps for both-sides."
-            else ->
-                "Finish checklist below"
+            offline && permsOk && auto -> "Ready (Classic offline auto-record)"
+            authorized && permsOk && auto -> "Ready (Enhanced both-sides available)"
+            permsOk && auto -> "Ready (Classic). Optional: Shizuku for both-sides."
+            else -> "Finish checklist below"
         }
 
         btnShizuku.isEnabled = !offline
         btnGetShizuku.isEnabled = !offline
         btnOpenShizuku.isEnabled = !offline
 
+        val path = RecordingStorage.humanPath(this)
         infoText.text = """
-            How it works
+            Storage and format
 
-            • Steps 1–2 + Auto-record = works alone (often one side).
-            • Steps 3–5 = optional both-sides boost via Shizuku-Next.
-            • Shizuku cannot live inside this APK (Android rule).
-            • Silent: this app does not play record beeps.
+            Folder: $path
+            (usually Internal storage / Music / CallRecordings)
 
-            After reboot: open Shizuku-Next once if you use Enhanced.
-            Files: Android/data/com.solid.callrecorder/files/CallRecordings/
+            Classic: M4A AAC mono 16 kHz 64 kbps
+            (~0.5 MB per minute, clear speech, small size)
+
+            Enhanced: 16 kHz mono WAV when Shizuku is active
+
+            Silent: no beep from this app.
         """.trimIndent()
     }
 
