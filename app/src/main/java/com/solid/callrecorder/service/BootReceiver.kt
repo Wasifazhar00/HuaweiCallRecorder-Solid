@@ -7,8 +7,16 @@ import android.util.Log
 
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action == Intent.ACTION_BOOT_COMPLETED) {
-            Log.i("BootReceiver", "Device booted – CallStateReceiver will handle calls")
+        val action = intent.action ?: return
+        if (action == Intent.ACTION_BOOT_COMPLETED ||
+            action == Intent.ACTION_MY_PACKAGE_REPLACED
+        ) {
+            Log.i(TAG, "Boot/update → arm auto-record monitor")
+            CallMonitorService.start(context)
         }
+    }
+
+    companion object {
+        private const val TAG = "BootReceiver"
     }
 }
