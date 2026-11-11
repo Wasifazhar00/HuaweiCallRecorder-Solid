@@ -9,6 +9,7 @@ import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
@@ -24,19 +25,18 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnStart: Button
     private lateinit var btnStop: Button
     private lateinit var btnShizuku: Button
+    private lateinit var chkOfflineOnly: CheckBox
     private lateinit var infoText: TextView
 
-    private val enhancedRecorder by lazy { ShizukuEnhancedRecorder(this) }
+    private val prefs by lazy { getSharedPreferences(PREFS, MODE_PRIVATE) }
+    private val enhanced by lazy { ShizukuEnhancedRecorder(this) }
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { results ->
-        val allGranted = results.values.all { it }
-        if (allGranted) {
+        if (results.values.all { it }) {
             Toast.makeText(this, "Permissions OK", Toast.LENGTH_SHORT).show()
             maybeRequestBatteryExemption()
-        } else {
-            Toast.makeText(this, "Some permissions denied – recording may fail", Toast.LENGTH_LONG).show()
         }
         updateUI()
     }
@@ -49,41 +49,57 @@ class MainActivity : AppCompatActivity() {
         btnStart = findViewById(R.id.btnStart)
         btnStop = findViewById(R.id.btnStop)
         btnShizuku = findViewById(R.id.btnShizuku)
+        chkOfflineOnly = findViewById(R.id.chkOfflineOnly)
         infoText = findViewById(R.id.infoText)
 
+        chkOfflineOnly.isChecked = prefs.getBoolean(KEY_OFFLINE_ONLY, false)
+        chkOfflineOnly.setOnCheckedChangeListener { _, checked ->
+            prefs.edit().putBoolean(KEY_OFFLINE_ONLY, checked).apply()
+            btnShizuku.isEnabled = !checked
+            updateUI()
+        }
+        btnShizuku.isEnabled = !chkOfflineOnly.isChecked
+
         btnStart.setOnClickListener {
-            if (checkPermissions()) {
-                val intent = Intent(this, CallRecorderService::class.java).apply {
+            if (!checkPermissions()) {
+                requestPermissions()
+                return@setOnClickListener
+            }
+            startForegroundService(
+                Intent(this, CallRecorderService::class.java).apply {
                     action = CallRecorderService.ACTION_START
                     putExtra(CallRecorderService.EXTRA_NUMBER, "manual")
+                    putExtra(CallRecorderService.EXTRA_OFFLINE_ONLY, chkOfflineOnly.isChecked)
                 }
-                startForegroundService(intent)
-                statusText.text = "Recording…"
-            } else {
-                requestPermissions()
-            }
+            )
+            statusText.text = "Recording…"
         }
 
         btnStop.setOnClickListener {
-            startService(Intent(this, CallRecorderService::class.java).apply {
-                action = CallRecorderService.ACTION_STOP
-            })
+            startService(
+                Intent(this, CallRecorderService::class.java).apply {
+                    action = CallRecorderService.ACTION_STOP
+                }
+            )
             statusText.text = "Stopped"
         }
 
         btnShizuku.setOnClickListener {
             if (!ShizukuEnhancedRecorder.isShizukuInstalled(this)) {
-                Toast.makeText(this, "Install Shizuku first", Toast.LENGTH_LONG).show()
+                Toast.makeText(
+                    this,
+                    "Install Shizuku-Next (or Shizuku) from GitHub", Toast.LENGTH_LONG
+                ).show()
                 return@setOnClickListener
             }
-            enhancedRecorder.requestPermission()
-            Toast.makeText(this, "Grant this app in Shizuku", Toast.LENGTH_LONG).show()
-            statusText.postDelayed({ updateUI() }, 1500)
+            enhanced.requestPermission()
+            Toast.makeText(this, "Grant access in Shizuku-Next", Toast.LENGTH_LONG).show()
+            statusText.postDelayed({ updateUI() }, 1200)
         }
 
-        updateUI()
         if (!checkPermissions()) requestPermissions()
         else maybeRequestBatteryExemption()
+        updateUI()
     }
 
     override fun onResume() {
@@ -115,52 +131,55 @@ class MainActivity : AppCompatActivity() {
         permissionLauncher.launch(needed.toTypedArray())
     }
 
-    /** Ask once to ignore battery optimizations so the service is not killed mid-call. */
     private fun maybeRequestBatteryExemption() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
         val pm = getSystemService(POWER_SERVICE) as PowerManager
         if (pm.isIgnoringBatteryOptimizations(packageName)) return
         try {
-            val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
-                data = Uri.parse("package:$packageName")
-            }
-            startActivity(intent)
+            startActivity(
+                Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                    data = Uri.parse("package:$packageName")
+                }
+            )
         } catch (_: Exception) {
-            // Some OEMs block this intent – user can set it manually in Settings
         }
     }
 
     private fun updateUI() {
+        val offline = prefs.getBoolean(KEY_OFFLINE_ONLY, false)
         val basicOk = checkPermissions()
-        val shizukuInstalled = ShizukuEnhancedRecorder.isShizukuInstalled(this)
-        val shizukuReady = enhancedRecorder.isAvailable()
+        val installed = ShizukuEnhancedRecorder.isShizukuInstalled(this)
+        val ready = !offline && enhanced.isAvailable()
 
         statusText.text = buildString {
-            append(if (basicOk) "Permissions: OK" else "Permissions: Missing")
-            append("\n")
-            append(when {
-                !shizukuInstalled -> "Shizuku: Not installed (Classic only)"
-                shizukuReady -> "Shizuku: Ready – both-sides path active"
-                else -> "Shizuku: Install & grant permission"
-            })
+            append(if (basicOk) "Permissions: OK" else "Permissions: need grant")
+            append('\n')
+            when {
+                offline -> append("Mode: Offline (Classic only – no Wi‑Fi debug needed)")
+                !installed -> append("Shizuku-Next: not installed")
+                ready -> append("Shizuku-Next: ready – both-sides path on")
+                else -> append("Shizuku-Next: start service & authorize this app")
+            }
         }
 
         infoText.text = """
-            Solid Call Recorder – silent mode
+            Solid Call Recorder 1.3 – silent, lean
 
-            • No beep / no announcement from this app
-            • Notification is silent and minimal (required by Android)
-            • Low battery: service only runs during a call
+            Recommended: Shizuku-Next (same API as Shizuku)
+            • Start once (Wireless Debugging, USB, or root)
+            • Many Next builds can keep service without constant Wi‑Fi
+            • Authorize this app, then uncheck Offline only
 
-            For both sides (recommended):
-            1. Install & start Shizuku
-            2. Tap "Request Shizuku Permission"
-            3. Grant access
+            Offline only: no Shizuku, no developer mode required
+            → Classic mic path (often one side). Works anywhere.
 
-            Without Shizuku: Classic path (often your voice only)
-
+            App stays silent (no beep). Notification is minimal.
             Files: Android/data/…/files/CallRecordings/
-            Check local laws before recording calls.
         """.trimIndent()
+    }
+
+    companion object {
+        const val PREFS = "solid_prefs"
+        const val KEY_OFFLINE_ONLY = "offline_only"
     }
 }
