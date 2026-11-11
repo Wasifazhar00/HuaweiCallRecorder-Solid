@@ -25,17 +25,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.sqrt
 
 /**
- * Privileged recorder running inside Shizuku process (UID 2000 = shell).
- *
- * Strategy ladder (cellular + VoIP aware):
- *  1. DUAL_UPLINK_DOWNLINK  – best for cellular/VoLTE
- *  2. MIC_PLUS_DOWNLINK     – Samsung-friendly / partial VoIP
- *  3. VOICE_CALL            – mixed both sides when allowed
- *  4. VOICE_COMMUNICATION   – preferred for VoIP / Wi-Fi calling (Android 14+)
- *  5. MIC_ONLY              – last resort (local side only)
- *
- * Each candidate is started briefly and checked for non-silent audio (RMS).
- * The first strategy that passes the audibility test is kept.
+ * Privileged recorder (Shizuku shell UID).
+ * 16 kHz mono PCM WAV – smaller than 44.1 kHz, still clear for speech.
  */
 class ShellRecorderUserService : IShellRecorder.Stub {
 
@@ -82,14 +73,17 @@ class ShellRecorderUserService : IShellRecorder.Stub {
         if (recording.get()) return false
         val ctx = shellContext ?: return false
         outputFile = File(outputPath)
+        outputFile?.parentFile?.mkdirs()
         activeStrategy = null
 
         val audioMode = try {
             (ctx.getSystemService(Context.AUDIO_SERVICE) as? AudioManager)?.mode
-        } catch (_: Exception) { null }
+        } catch (_: Exception) {
+            null
+        }
 
         val isVoipLikely = audioMode == AudioManager.MODE_IN_COMMUNICATION
-        Log.i(TAG, "start() path=$outputPath number=$phoneNumber audioMode=$audioMode voipLikely=$isVoipLikely")
+        Log.i(TAG, "start() path=$outputPath voipLikely=$isVoipLikely")
 
         val latch = CountDownLatch(1)
         var success = false
@@ -115,17 +109,13 @@ class ShellRecorderUserService : IShellRecorder.Stub {
             statusMessage = activeStrategy?.let {
                 "recording [${it.label}] ${it.description}"
             } ?: "recording"
-            Log.i(TAG, "SUCCESS strategy=${activeStrategy?.label} → $outputPath")
+            Log.i(TAG, "SUCCESS strategy=${activeStrategy?.label}")
         } else {
             statusMessage = "all strategies failed"
-            Log.w(TAG, "ALL strategies failed for $outputPath")
         }
         return success
     }
 
-    /**
-     * Ordered attempts. VoIP-likely calls try VOICE_COMMUNICATION earlier.
-     */
     private fun runStrategyLadder(ctx: Context, voipLikely: Boolean): Boolean {
         val order = if (voipLikely) {
             listOf(
@@ -146,7 +136,6 @@ class ShellRecorderUserService : IShellRecorder.Stub {
         }
 
         for (strategy in order) {
-            Log.i(TAG, "Trying strategy: ${strategy.label}")
             val ok = when (strategy) {
                 RecordingStrategy.DUAL_UPLINK_DOWNLINK -> tryDual(ctx)
                 RecordingStrategy.MIC_PLUS_DOWNLINK -> tryMicPlusDownlink(ctx)
@@ -156,12 +145,9 @@ class ShellRecorderUserService : IShellRecorder.Stub {
             }
             if (ok) {
                 activeStrategy = strategy
-                Log.i(TAG, "Strategy ACCEPTED: ${strategy.label} – ${strategy.description}")
                 return true
-            } else {
-                Log.w(TAG, "Strategy REJECTED (silent or failed): ${strategy.label}")
-                releaseAllRecords()
             }
+            releaseAllRecords()
         }
         return false
     }
@@ -180,14 +166,12 @@ class ShellRecorderUserService : IShellRecorder.Stub {
             down.startRecording()
             val level = measureRms(up, down)
             if (level < SILENCE_THRESHOLD) {
-                Log.w(TAG, "Dual RMS too low: $level")
                 up.stop(); up.release()
                 down.stop(); down.release()
                 return false
             }
             uplinkRecord = up
             downlinkRecord = down
-            Log.i(TAG, "Dual accepted, RMS=$level")
             true
         } catch (e: Throwable) {
             Log.w(TAG, "tryDual failed", e)
@@ -209,14 +193,12 @@ class ShellRecorderUserService : IShellRecorder.Stub {
             down.startRecording()
             val level = measureRms(mic, down)
             if (level < SILENCE_THRESHOLD) {
-                Log.w(TAG, "MIC+DOWNLINK RMS too low: $level")
                 mic.stop(); mic.release()
                 down.stop(); down.release()
                 return false
             }
-            uplinkRecord = mic   // reuse uplink slot for mic
+            uplinkRecord = mic
             downlinkRecord = down
-            Log.i(TAG, "MIC+DOWNLINK accepted, RMS=$level")
             true
         } catch (e: Throwable) {
             Log.w(TAG, "tryMicPlusDownlink failed", e)
@@ -231,27 +213,22 @@ class ShellRecorderUserService : IShellRecorder.Stub {
             rec.startRecording()
             val level = measureRms(rec, null)
             if (level < SILENCE_THRESHOLD && strategy != RecordingStrategy.MIC_ONLY) {
-                // For MIC_ONLY we accept even quiet levels (may be silent room)
-                Log.w(TAG, "Single source=$source RMS too low: $level")
                 rec.stop(); rec.release()
                 return false
             }
             singleRecord = rec
-            Log.i(TAG, "Single source=$source accepted, RMS=$level strategy=${strategy.label}")
             true
         } catch (e: Throwable) {
-            Log.w(TAG, "trySingle source=$source failed", e)
+            Log.w(TAG, "trySingle failed", e)
             false
         }
     }
 
-    /** Quick RMS over a short window to detect pure silence. */
     private fun measureRms(primary: AudioRecord, secondary: AudioRecord?): Double {
         val buf = ShortArray(2048)
         var sumSquares = 0.0
         var samples = 0
         val deadline = System.currentTimeMillis() + 350
-
         while (System.currentTimeMillis() < deadline) {
             val n = primary.read(buf, 0, buf.size)
             if (n > 0) {
@@ -310,7 +287,7 @@ class ShellRecorderUserService : IShellRecorder.Stub {
     }
 
     private fun audioParams(): Quad {
-        val sampleRate = 44100
+        val sampleRate = SAMPLE_RATE
         val channelConfig = AudioFormat.CHANNEL_IN_MONO
         val encoding = AudioFormat.ENCODING_PCM_16BIT
         val minBuf = AudioRecord.getMinBufferSize(sampleRate, channelConfig, encoding)
@@ -326,21 +303,18 @@ class ShellRecorderUserService : IShellRecorder.Stub {
             val file = outputFile ?: return@Thread
             try {
                 FileOutputStream(file).use { fos ->
-                    writeWavHeader(fos, 0, 44100, 1, 16)
+                    writeWavHeader(fos, 0, SAMPLE_RATE, 1, 16)
                     val buffer = ByteArray(4096)
                     var totalBytes = 0L
-
                     while (recording.get()) {
                         val read = readMixed(buffer)
                         if (read > 0) {
                             fos.write(buffer, 0, read)
                             totalBytes += read
-                        } else if (read < 0) {
-                            break
-                        }
+                        } else if (read < 0) break
                     }
                     patchWavHeader(file, totalBytes)
-                    Log.i(TAG, "Writer finished, bytes=$totalBytes strategy=${activeStrategy?.label}")
+                    Log.i(TAG, "Writer finished bytes=$totalBytes")
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Writer error", e)
@@ -361,8 +335,8 @@ class ShellRecorderUserService : IShellRecorder.Stub {
                         if (i + 1 < n) {
                             val u = (upBuf[i].toInt() and 0xFF) or (upBuf[i + 1].toInt() shl 8)
                             val d = (downBuf[i].toInt() and 0xFF) or (downBuf[i + 1].toInt() shl 8)
-                            // Soft mix to avoid clipping
-                            val mixed = ((u.toShort() + d.toShort()) / 2).toInt().coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
+                            val mixed = ((u.toShort() + d.toShort()) / 2).toInt()
+                                .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
                             buffer[i] = (mixed and 0xFF).toByte()
                             buffer[i + 1] = ((mixed shr 8) and 0xFF).toByte()
                         }
@@ -385,7 +359,6 @@ class ShellRecorderUserService : IShellRecorder.Stub {
         statusMessage = "stopped [${activeStrategy?.label ?: "none"}]"
         val path = outputFile?.absolutePath
         outputFile = null
-        Log.i(TAG, "stop() → $path strategy=${activeStrategy?.label}")
         return path
     }
 
@@ -394,7 +367,8 @@ class ShellRecorderUserService : IShellRecorder.Stub {
             uplinkRecord?.apply { stop(); release() }
             downlinkRecord?.apply { stop(); release() }
             singleRecord?.apply { stop(); release() }
-        } catch (_: Exception) {}
+        } catch (_: Exception) {
+        }
         uplinkRecord = null
         downlinkRecord = null
         singleRecord = null
@@ -405,7 +379,7 @@ class ShellRecorderUserService : IShellRecorder.Stub {
             val pm = ctx.getSystemService(Context.POWER_SERVICE) as PowerManager
             wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "SolidCallRecorder:ShellRec").apply {
                 setReferenceCounted(false)
-                acquire(60 * 60 * 1000L) // max 1 hour safety
+                acquire(60 * 60 * 1000L)
             }
         } catch (e: Exception) {
             Log.w(TAG, "WakeLock failed", e)
@@ -415,7 +389,8 @@ class ShellRecorderUserService : IShellRecorder.Stub {
     private fun releaseWakeLock() {
         try {
             wakeLock?.let { if (it.isHeld) it.release() }
-        } catch (_: Exception) {}
+        } catch (_: Exception) {
+        }
         wakeLock = null
     }
 
@@ -462,7 +437,8 @@ class ShellRecorderUserService : IShellRecorder.Stub {
 
     companion object {
         private const val TAG = "ShellRecorderUS"
-        /** RMS below this is treated as silence (16-bit PCM scale). */
         private const val SILENCE_THRESHOLD = 25.0
+        /** Speech-optimized; ~2.75× smaller than 44.1 kHz WAV. */
+        private const val SAMPLE_RATE = 16_000
     }
 }
