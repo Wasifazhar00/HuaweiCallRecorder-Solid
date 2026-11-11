@@ -10,16 +10,9 @@ import com.solid.callrecorder.IShellRecorder
 import com.solid.callrecorder.shizuku.ShellRecorderUserService
 import rikka.shizuku.Shizuku
 import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
-/**
- * Enhanced path via Shizuku / Shizuku-Next UserService (shell UID).
- * Same binder API works with official Shizuku and Shizuku-Next.
- */
 class ShizukuEnhancedRecorder(private val context: Context) : EnhancedRecorder {
 
     private var service: IShellRecorder? = null
@@ -33,7 +26,7 @@ class ShizukuEnhancedRecorder(private val context: Context) : EnhancedRecorder {
         .daemon(false)
         .processNameSuffix("shellrec")
         .debuggable(false)
-        .version(3)
+        .version(4)
 
     private val binderReceivedListener = Shizuku.OnBinderReceivedListener {
         Log.i(TAG, "Shizuku binder ready")
@@ -50,7 +43,6 @@ class ShizukuEnhancedRecorder(private val context: Context) : EnhancedRecorder {
             Shizuku.addBinderReceivedListenerSticky(binderReceivedListener)
             Shizuku.addBinderDeadListener(binderDeadListener)
         } catch (_: Throwable) {
-            // Manager not installed – offline / classic only
         }
     }
 
@@ -104,7 +96,6 @@ class ShizukuEnhancedRecorder(private val context: Context) : EnhancedRecorder {
 
         return try {
             Shizuku.bindUserService(userServiceArgs, conn)
-            // 3s is enough when service is warm; fails fast offline
             val ok = latch.await(3, TimeUnit.SECONDS) && bound
             if (!ok) Log.w(TAG, "UserService bind timeout")
             ok
@@ -119,12 +110,8 @@ class ShizukuEnhancedRecorder(private val context: Context) : EnhancedRecorder {
         if (!isAvailable()) return false
         if (!ensureBound()) return false
 
-        val dir = File(context.getExternalFilesDir(null), "CallRecordings")
-        if (!dir.exists()) dir.mkdirs()
-
-        val ts = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-        val num = phoneNumber?.replace(Regex("[^0-9+]"), "") ?: "unknown"
-        val out = File(dir, "E_${num}_$ts.wav")
+        // 16 kHz mono WAV (smaller than 44.1k); shell path is still PCM
+        val out = RecordingStorage.newFile(context, "Call", phoneNumber, "wav")
         currentOutput = out
 
         return try {
@@ -132,7 +119,9 @@ class ShizukuEnhancedRecorder(private val context: Context) : EnhancedRecorder {
             if (started) {
                 lastStrategy = try {
                     service?.activeStrategy?.takeIf { it.isNotBlank() }
-                } catch (_: Exception) { null }
+                } catch (_: Exception) {
+                    null
+                }
             } else {
                 currentOutput = null
             }
@@ -149,7 +138,9 @@ class ShizukuEnhancedRecorder(private val context: Context) : EnhancedRecorder {
             val path = service?.stop()
             val file = path?.let { File(it) } ?: currentOutput
             currentOutput = null
-            file
+            file?.also {
+                RecordingStorage.indexInMediaStore(context, it, "audio/wav")
+            }
         } catch (e: Exception) {
             Log.e(TAG, "stop failed", e)
             currentOutput.also { currentOutput = null }
@@ -164,11 +155,13 @@ class ShizukuEnhancedRecorder(private val context: Context) : EnhancedRecorder {
                     override fun onServiceDisconnected(n: ComponentName?) {}
                 }, true)
             }
-        } catch (_: Throwable) {}
+        } catch (_: Throwable) {
+        }
         try {
             Shizuku.removeBinderReceivedListener(binderReceivedListener)
             Shizuku.removeBinderDeadListener(binderDeadListener)
-        } catch (_: Throwable) {}
+        } catch (_: Throwable) {
+        }
         service = null
         bound = false
         lastStrategy = null
@@ -177,9 +170,8 @@ class ShizukuEnhancedRecorder(private val context: Context) : EnhancedRecorder {
     companion object {
         private const val TAG = "ShizukuEnhanced"
 
-        /** Official Shizuku + Shizuku-Next share this package id. */
         private val MANAGER_PACKAGES = arrayOf(
-            "moe.shizuku.privileged.api", // official + Shizuku-Next
+            "moe.shizuku.privileged.api",
             "moe.shizuku.manager"
         )
 
@@ -193,15 +185,6 @@ class ShizukuEnhancedRecorder(private val context: Context) : EnhancedRecorder {
                 }
             }
             return false
-        }
-
-        /** Best-effort label for UI (Next vs stock not always distinguishable). */
-        fun managerLabel(context: Context): String {
-            return if (isShizukuInstalled(context)) {
-                "Shizuku / Shizuku-Next"
-            } else {
-                "Not installed"
-            }
         }
     }
 }
