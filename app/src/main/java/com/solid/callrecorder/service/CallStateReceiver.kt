@@ -5,32 +5,26 @@ import android.content.Context
 import android.content.Intent
 import android.telephony.TelephonyManager
 import android.util.Log
+import com.solid.callrecorder.ui.MainActivity
 
+/**
+ * Backup trigger. Primary path is CallMonitorService TelephonyCallback.
+ * On PHONE_STATE, ensure monitor is running so OFFHOOK is handled there.
+ */
 class CallStateReceiver : BroadcastReceiver() {
 
     override fun onReceive(context: Context, intent: Intent) {
+        val prefs = context.getSharedPreferences(MainActivity.PREFS, Context.MODE_PRIVATE)
+        if (!prefs.getBoolean(MainActivity.KEY_AUTO_RECORD, true)) return
+
         val state = intent.getStringExtra(TelephonyManager.EXTRA_STATE)
-        val number = intent.getStringExtra(TelephonyManager.EXTRA_INCOMING_NUMBER)
-            ?: intent.getStringExtra(Intent.EXTRA_PHONE_NUMBER)
+        Log.d(TAG, "broadcast state=$state action=${intent.action}")
 
-        Log.d(TAG, "state=$state number=$number")
-
-        when (state) {
-            TelephonyManager.EXTRA_STATE_OFFHOOK -> {
-                // Start only when call is connected – no ring-time recording
-                val start = Intent(context, CallRecorderService::class.java).apply {
-                    action = CallRecorderService.ACTION_START
-                    putExtra(CallRecorderService.EXTRA_NUMBER, number)
-                }
-                context.startForegroundService(start)
-            }
-            TelephonyManager.EXTRA_STATE_IDLE -> {
-                val stop = Intent(context, CallRecorderService::class.java).apply {
-                    action = CallRecorderService.ACTION_STOP
-                }
-                context.startService(stop)
-            }
-            // RINGING: do nothing (saves battery, no false starts)
+        // Keep monitor alive; it owns start/stop recording
+        try {
+            CallMonitorService.start(context)
+        } catch (e: Exception) {
+            Log.e(TAG, "ensure monitor failed", e)
         }
     }
 
