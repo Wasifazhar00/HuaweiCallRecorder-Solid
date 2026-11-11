@@ -26,7 +26,7 @@ class ShizukuEnhancedRecorder(private val context: Context) : EnhancedRecorder {
         .daemon(false)
         .processNameSuffix("shellrec")
         .debuggable(false)
-        .version(4)
+        .version(5)
 
     private val binderReceivedListener = Shizuku.OnBinderReceivedListener {
         Log.i(TAG, "Shizuku binder ready")
@@ -57,11 +57,9 @@ class ShizukuEnhancedRecorder(private val context: Context) : EnhancedRecorder {
 
     fun requestPermission(requestCode: Int = 1001) {
         try {
-            if (!Shizuku.isPreV11()) {
-                Shizuku.requestPermission(requestCode)
-            }
+            if (!Shizuku.isPreV11()) Shizuku.requestPermission(requestCode)
         } catch (e: Throwable) {
-            Log.e(TAG, "requestPermission failed", e)
+            Log.e(TAG, "requestPermission", e)
         }
     }
 
@@ -77,7 +75,6 @@ class ShizukuEnhancedRecorder(private val context: Context) : EnhancedRecorder {
             }
         }
         if (!isAvailable()) return false
-
         val latch = CountDownLatch(1)
         val conn = object : ServiceConnection {
             override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
@@ -93,25 +90,22 @@ class ShizukuEnhancedRecorder(private val context: Context) : EnhancedRecorder {
                 bound = false
             }
         }
-
         return try {
             Shizuku.bindUserService(userServiceArgs, conn)
-            val ok = latch.await(3, TimeUnit.SECONDS) && bound
-            if (!ok) Log.w(TAG, "UserService bind timeout")
-            ok
+            latch.await(3, TimeUnit.SECONDS) && bound
         } catch (e: Throwable) {
-            Log.e(TAG, "bindUserService", e)
+            Log.e(TAG, "bind", e)
             false
         }
     }
 
     override fun start(phoneNumber: String?): Boolean {
         lastStrategy = null
-        if (!isAvailable()) return false
-        if (!ensureBound()) return false
+        if (!isAvailable() || !ensureBound()) return false
 
-        // 16 kHz mono WAV (smaller than 44.1k); shell path is still PCM
-        val out = RecordingStorage.newFile(context, "Call", phoneNumber, "wav")
+        val dir = RecordingStorage.publicRecordingsDir() ?: RecordingStorage.safeAppDir(context)
+        val name = RecordingStorage.newFileName("Call", phoneNumber, "wav")
+        val out = File(dir, name)
         currentOutput = out
 
         return try {
@@ -122,12 +116,10 @@ class ShizukuEnhancedRecorder(private val context: Context) : EnhancedRecorder {
                 } catch (_: Exception) {
                     null
                 }
-            } else {
-                currentOutput = null
-            }
+            } else currentOutput = null
             started
         } catch (e: Exception) {
-            Log.e(TAG, "start failed", e)
+            Log.e(TAG, "start", e)
             currentOutput = null
             false
         }
@@ -138,11 +130,9 @@ class ShizukuEnhancedRecorder(private val context: Context) : EnhancedRecorder {
             val path = service?.stop()
             val file = path?.let { File(it) } ?: currentOutput
             currentOutput = null
-            file?.also {
-                RecordingStorage.indexInMediaStore(context, it, "audio/wav")
-            }
+            file
         } catch (e: Exception) {
-            Log.e(TAG, "stop failed", e)
+            Log.e(TAG, "stop", e)
             currentOutput.also { currentOutput = null }
         }
     }
@@ -164,12 +154,10 @@ class ShizukuEnhancedRecorder(private val context: Context) : EnhancedRecorder {
         }
         service = null
         bound = false
-        lastStrategy = null
     }
 
     companion object {
         private const val TAG = "ShizukuEnhanced"
-
         private val MANAGER_PACKAGES = arrayOf(
             "moe.shizuku.privileged.api",
             "moe.shizuku.manager"
