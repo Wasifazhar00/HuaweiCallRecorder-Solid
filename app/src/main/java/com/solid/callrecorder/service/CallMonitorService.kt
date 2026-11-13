@@ -16,6 +16,7 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import com.solid.callrecorder.SolidApp
+import com.solid.callrecorder.data.RecordingRepository
 import com.solid.callrecorder.recorder.AutoRecordPolicy
 import com.solid.callrecorder.recorder.CallRecorder
 import com.solid.callrecorder.recorder.GoogleStyleDualCapture
@@ -26,10 +27,6 @@ import java.io.File
 import java.util.concurrent.Executor
 import java.util.concurrent.atomic.AtomicBoolean
 
-/**
- * Ladder: policy → Oplus → Shizuku → Google dual AudioRecord → classic
- * No disclosure beep.
- */
 class CallMonitorService : Service() {
 
     private var telephonyManager: TelephonyManager? = null
@@ -41,6 +38,7 @@ class CallMonitorService : Service() {
     private var shizuku: ShizukuEnhancedRecorder? = null
     private var googleDual: GoogleStyleDualCapture? = null
     private var backend: String = "none"
+    private var lastNumber: String? = null
     private val mainHandler = Handler(Looper.getMainLooper())
 
     override fun onCreate() {
@@ -54,6 +52,7 @@ class CallMonitorService : Service() {
             return
         }
         registerCallCallback()
+        RecordingRepository.applyRetention(this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -170,6 +169,7 @@ class CallMonitorService : Service() {
     }
 
     private fun startRecordingNow(number: String?) {
+        lastNumber = number
         mainHandler.postDelayed({
             if (!inCall.get()) return@postDelayed
             if (!AutoRecordPolicy.shouldRecord(this, number)) {
@@ -207,6 +207,7 @@ class CallMonitorService : Service() {
 
     private fun stopRecordingNow() {
         mainHandler.removeCallbacksAndMessages(null)
+        val usedBackend = backend
         val file: File? = try {
             when (backend) {
                 "oplus" -> oplus?.stop()
@@ -220,7 +221,13 @@ class CallMonitorService : Service() {
             null
         }
         backend = "none"
-        updateNotif(if (file != null) "Saved ${file.name}" else "Auto-record on – waiting for calls")
+        if (file != null) {
+            RecordingRepository.onRecordingFinished(this, file.absolutePath, lastNumber, usedBackend)
+            updateNotif("Saved ${file.name}")
+        } else {
+            updateNotif("Auto-record on – waiting for calls")
+        }
+        lastNumber = null
         mainHandler.postDelayed({ updateNotif("Auto-record on – waiting for calls") }, 3500)
     }
 
