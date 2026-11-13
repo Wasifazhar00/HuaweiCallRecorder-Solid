@@ -9,24 +9,25 @@ import android.media.MediaRecorder
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.ParcelFileDescriptor
 import android.os.PowerManager
 import android.os.RemoteException
 import android.util.Log
 import com.solid.callrecorder.IShellRecorder
 import com.solid.callrecorder.recorder.RecordingStrategy
-import java.io.File
 import java.io.FileOutputStream
-import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
-import kotlin.math.sqrt
 
 /**
- * Privileged recorder (Shizuku shell UID).
- * 16 kHz mono PCM WAV – smaller than 44.1 kHz, still clear for speech.
+ * Shizuku shell recorder.
+ * Keeps the first source that actually enters RECORDSTATE_RECORDING.
+ * Does not reject a quiet first half-second (that was dropping VOICE_CALL).
+ * Audio is written through the app's file descriptor and the WAV header is
+ * patched on that same descriptor so the file is playable.
  */
 class ShellRecorderUserService : IShellRecorder.Stub {
 
@@ -35,7 +36,7 @@ class ShellRecorderUserService : IShellRecorder.Stub {
     private var downlinkRecord: AudioRecord? = null
     private var singleRecord: AudioRecord? = null
     private var writeThread: Thread? = null
-    private var outputFile: File? = null
+    private var outputPfd: ParcelFileDescriptor? = null
     private var statusMessage: String = "idle"
     private var activeStrategy: RecordingStrategy? = null
     private var shellContext: Context? = null
@@ -44,7 +45,7 @@ class ShellRecorderUserService : IShellRecorder.Stub {
     constructor(context: Context) {
         val base = obtainSystemContext(context)
         shellContext = WrappedShellContext(base)
-        Log.i(TAG, "ShellRecorderUserService created uid=${android.os.Process.myUid()}")
+        Log.i(TAG, "ShellRecorderUserService uid=${android.os.Process.myUid()}")
     }
 
     constructor() : this(
@@ -63,17 +64,17 @@ class ShellRecorderUserService : IShellRecorder.Stub {
             val systemMain = atClass.getMethod("systemMain").invoke(null)
             atClass.getMethod("getSystemContext").invoke(systemMain) as Context
         } catch (e: Throwable) {
-            Log.w(TAG, "system context reflection failed, using fallback", e)
+            Log.w(TAG, "system context failed", e)
             fallback.applicationContext
         }
     }
 
     @Throws(RemoteException::class)
-    override fun start(outputPath: String, phoneNumber: String?): Boolean {
+    override fun start(output: ParcelFileDescriptor?, phoneNumber: String?): Boolean {
         if (recording.get()) return false
         val ctx = shellContext ?: return false
-        outputFile = File(outputPath)
-        outputFile?.parentFile?.mkdirs()
+        if (output == null) return false
+        outputPfd = output
         activeStrategy = null
 
         val audioMode = try {
@@ -81,67 +82,64 @@ class ShellRecorderUserService : IShellRecorder.Stub {
         } catch (_: Exception) {
             null
         }
-
-        val isVoipLikely = audioMode == AudioManager.MODE_IN_COMMUNICATION
-        Log.i(TAG, "start() path=$outputPath voipLikely=$isVoipLikely")
+        val voip = audioMode == AudioManager.MODE_IN_COMMUNICATION
+        Log.i(TAG, "start voip=$voip number=$phoneNumber")
 
         val latch = CountDownLatch(1)
         var success = false
-
         Handler(Looper.getMainLooper()).post {
             try {
-                success = runStrategyLadder(ctx, isVoipLikely)
+                success = runStrategyLadder(ctx, voip)
             } catch (e: Throwable) {
-                Log.e(TAG, "strategy ladder failed", e)
+                Log.e(TAG, "ladder", e)
                 statusMessage = "error: ${e.message}"
                 success = false
             } finally {
                 latch.countDown()
             }
         }
-
         latch.await(6, TimeUnit.SECONDS)
 
         if (success) {
             recording.set(true)
             acquireWakeLock(ctx)
             startWriterThread()
-            statusMessage = activeStrategy?.let {
-                "recording [${it.label}] ${it.description}"
-            } ?: "recording"
-            Log.i(TAG, "SUCCESS strategy=${activeStrategy?.label}")
+            statusMessage = activeStrategy?.label ?: "recording"
+            Log.i(TAG, "SUCCESS ${activeStrategy?.label}")
         } else {
             statusMessage = "all strategies failed"
+            try {
+                output.close()
+            } catch (_: Exception) {
+            }
+            outputPfd = null
         }
         return success
     }
 
-    private fun runStrategyLadder(ctx: Context, voipLikely: Boolean): Boolean {
-        val order = if (voipLikely) {
+    private fun runStrategyLadder(ctx: Context, voip: Boolean): Boolean {
+        val order = if (voip) {
             listOf(
                 RecordingStrategy.VOICE_COMMUNICATION,
-                RecordingStrategy.DUAL_UPLINK_DOWNLINK,
-                RecordingStrategy.MIC_PLUS_DOWNLINK,
                 RecordingStrategy.VOICE_CALL,
+                RecordingStrategy.DUAL_UPLINK_DOWNLINK,
                 RecordingStrategy.MIC_ONLY
             )
         } else {
             listOf(
-                RecordingStrategy.DUAL_UPLINK_DOWNLINK,
-                RecordingStrategy.MIC_PLUS_DOWNLINK,
                 RecordingStrategy.VOICE_CALL,
+                RecordingStrategy.DUAL_UPLINK_DOWNLINK,
                 RecordingStrategy.VOICE_COMMUNICATION,
                 RecordingStrategy.MIC_ONLY
             )
         }
-
         for (strategy in order) {
             val ok = when (strategy) {
                 RecordingStrategy.DUAL_UPLINK_DOWNLINK -> tryDual(ctx)
-                RecordingStrategy.MIC_PLUS_DOWNLINK -> tryMicPlusDownlink(ctx)
-                RecordingStrategy.VOICE_CALL -> trySingle(ctx, MediaRecorder.AudioSource.VOICE_CALL, strategy)
-                RecordingStrategy.VOICE_COMMUNICATION -> trySingle(ctx, MediaRecorder.AudioSource.VOICE_COMMUNICATION, strategy)
-                RecordingStrategy.MIC_ONLY -> trySingle(ctx, MediaRecorder.AudioSource.MIC, strategy)
+                RecordingStrategy.MIC_PLUS_DOWNLINK -> false
+                RecordingStrategy.VOICE_CALL -> trySingle(ctx, MediaRecorder.AudioSource.VOICE_CALL)
+                RecordingStrategy.VOICE_COMMUNICATION -> trySingle(ctx, MediaRecorder.AudioSource.VOICE_COMMUNICATION)
+                RecordingStrategy.MIC_ONLY -> trySingle(ctx, MediaRecorder.AudioSource.MIC)
             }
             if (ok) {
                 activeStrategy = strategy
@@ -164,93 +162,38 @@ class ShellRecorderUserService : IShellRecorder.Stub {
             }
             up.startRecording()
             down.startRecording()
-            val level = measureRms(up, down)
-            if (level < SILENCE_THRESHOLD) {
-                up.stop(); up.release()
-                down.stop(); down.release()
+            val upOk = up.recordingState == AudioRecord.RECORDSTATE_RECORDING
+            val downOk = down.recordingState == AudioRecord.RECORDSTATE_RECORDING
+            if (!upOk || !downOk) {
+                try { up.stop() } catch (_: Exception) {}
+                try { down.stop() } catch (_: Exception) {}
+                up.release(); down.release()
                 return false
             }
             uplinkRecord = up
             downlinkRecord = down
             true
         } catch (e: Throwable) {
-            Log.w(TAG, "tryDual failed", e)
+            Log.w(TAG, "dual ${e.message}")
             false
         }
     }
 
-    private fun tryMicPlusDownlink(ctx: Context): Boolean {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return false
-        return try {
-            val (sampleRate, channelConfig, encoding, bufSize) = audioParams()
-            val mic = buildRecord(ctx, MediaRecorder.AudioSource.MIC, sampleRate, channelConfig, encoding, bufSize)
-            val down = buildRecord(ctx, MediaRecorder.AudioSource.VOICE_DOWNLINK, sampleRate, channelConfig, encoding, bufSize)
-            if (mic == null || down == null) {
-                mic?.release(); down?.release()
-                return false
-            }
-            mic.startRecording()
-            down.startRecording()
-            val level = measureRms(mic, down)
-            if (level < SILENCE_THRESHOLD) {
-                mic.stop(); mic.release()
-                down.stop(); down.release()
-                return false
-            }
-            uplinkRecord = mic
-            downlinkRecord = down
-            true
-        } catch (e: Throwable) {
-            Log.w(TAG, "tryMicPlusDownlink failed", e)
-            false
-        }
-    }
-
-    private fun trySingle(ctx: Context, source: Int, strategy: RecordingStrategy): Boolean {
+    private fun trySingle(ctx: Context, source: Int): Boolean {
         return try {
             val (sampleRate, channelConfig, encoding, bufSize) = audioParams()
             val rec = buildRecord(ctx, source, sampleRate, channelConfig, encoding, bufSize) ?: return false
             rec.startRecording()
-            val level = measureRms(rec, null)
-            if (level < SILENCE_THRESHOLD && strategy != RecordingStrategy.MIC_ONLY) {
-                rec.stop(); rec.release()
+            if (rec.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+                rec.release()
                 return false
             }
             singleRecord = rec
             true
         } catch (e: Throwable) {
-            Log.w(TAG, "trySingle failed", e)
+            Log.w(TAG, "single $source ${e.message}")
             false
         }
-    }
-
-    private fun measureRms(primary: AudioRecord, secondary: AudioRecord?): Double {
-        val buf = ShortArray(2048)
-        var sumSquares = 0.0
-        var samples = 0
-        val deadline = System.currentTimeMillis() + 350
-        while (System.currentTimeMillis() < deadline) {
-            val n = primary.read(buf, 0, buf.size)
-            if (n > 0) {
-                for (i in 0 until n) {
-                    val s = buf[i].toDouble()
-                    sumSquares += s * s
-                    samples++
-                }
-            }
-            secondary?.let {
-                val n2 = it.read(buf, 0, buf.size)
-                if (n2 > 0) {
-                    for (i in 0 until n2) {
-                        val s = buf[i].toDouble()
-                        sumSquares += s * s
-                        samples++
-                    }
-                }
-            }
-        }
-        if (samples == 0) return 0.0
-        return sqrt(sumSquares / samples)
     }
 
     @SuppressLint("MissingPermission")
@@ -263,7 +206,7 @@ class ShellRecorderUserService : IShellRecorder.Stub {
         bufSize: Int
     ): AudioRecord? {
         return try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val rec = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 AudioRecord.Builder()
                     .setContext(ctx)
                     .setAudioSource(source)
@@ -279,9 +222,13 @@ class ShellRecorderUserService : IShellRecorder.Stub {
             } else {
                 @Suppress("DEPRECATION")
                 AudioRecord(source, sampleRate, channelConfig, encoding, bufSize)
-            }.takeIf { it.state == AudioRecord.STATE_INITIALIZED }
+            }
+            if (rec.state == AudioRecord.STATE_INITIALIZED) rec else {
+                rec.release()
+                null
+            }
         } catch (e: Throwable) {
-            Log.w(TAG, "buildRecord source=$source: ${e.message}")
+            Log.w(TAG, "build $source ${e.message}")
             null
         }
     }
@@ -300,74 +247,85 @@ class ShellRecorderUserService : IShellRecorder.Stub {
     private fun startWriterThread() {
         writeThread = Thread({
             android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO)
-            val file = outputFile ?: return@Thread
+            val pfd = outputPfd ?: return@Thread
             try {
-                FileOutputStream(file).use { fos ->
-                    writeWavHeader(fos, 0, SAMPLE_RATE, 1, 16)
+                FileOutputStream(pfd.fileDescriptor).use { fos ->
+                    writeWavHeader(fos, 0)
                     val buffer = ByteArray(4096)
-                    var totalBytes = 0L
+                    var total = 0L
                     while (recording.get()) {
-                        val read = readMixed(buffer)
-                        if (read > 0) {
-                            fos.write(buffer, 0, read)
-                            totalBytes += read
-                        } else if (read < 0) break
+                        val n = readMixed(buffer)
+                        if (n > 0) {
+                            fos.write(buffer, 0, n)
+                            total += n
+                        } else if (n < 0) {
+                            break
+                        }
                     }
-                    patchWavHeader(file, totalBytes)
-                    Log.i(TAG, "Writer finished bytes=$totalBytes")
+                    fos.flush()
+                    patchHeader(fos, total)
+                    Log.i(TAG, "wrote bytes=$total")
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Writer error", e)
+                Log.e(TAG, "writer", e)
             }
         }, "ShellRecorderWriter").also { it.start() }
     }
 
     private fun readMixed(buffer: ByteArray): Int {
-        return when {
-            uplinkRecord != null && downlinkRecord != null -> {
-                val upBuf = ByteArray(2048)
-                val downBuf = ByteArray(2048)
-                val upRead = uplinkRecord!!.read(upBuf, 0, upBuf.size)
-                val downRead = downlinkRecord!!.read(downBuf, 0, downBuf.size)
-                val n = minOf(upRead, downRead)
-                if (n > 0) {
-                    for (i in 0 until n step 2) {
-                        if (i + 1 < n) {
-                            val u = (upBuf[i].toInt() and 0xFF) or (upBuf[i + 1].toInt() shl 8)
-                            val d = (downBuf[i].toInt() and 0xFF) or (downBuf[i + 1].toInt() shl 8)
-                            val mixed = ((u.toShort() + d.toShort()) / 2).toInt()
-                                .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
-                            buffer[i] = (mixed and 0xFF).toByte()
-                            buffer[i + 1] = ((mixed shr 8) and 0xFF).toByte()
-                        }
-                    }
-                    n
-                } else 0
+        val up = uplinkRecord
+        val down = downlinkRecord
+        if (up != null && down != null) {
+            val upBuf = ByteArray(2048)
+            val downBuf = ByteArray(2048)
+            val upRead = up.read(upBuf, 0, upBuf.size)
+            val downRead = down.read(downBuf, 0, downBuf.size)
+            val n = minOf(upRead, downRead)
+            if (n <= 0) return n
+            var i = 0
+            while (i + 1 < n) {
+                val u = (upBuf[i].toInt() and 0xFF) or (upBuf[i + 1].toInt() shl 8)
+                val d = (downBuf[i].toInt() and 0xFF) or (downBuf[i + 1].toInt() shl 8)
+                val mixed = ((u.toShort() + d.toShort()) / 2).toInt()
+                    .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
+                buffer[i] = (mixed and 0xFF).toByte()
+                buffer[i + 1] = ((mixed shr 8) and 0xFF).toByte()
+                i += 2
             }
-            singleRecord != null -> singleRecord!!.read(buffer, 0, buffer.size)
-            else -> 0
+            return n
         }
+        return singleRecord?.read(buffer, 0, buffer.size) ?: 0
     }
 
     @Throws(RemoteException::class)
     override fun stop(): String? {
         if (!recording.getAndSet(false)) return null
         releaseAllRecords()
-        writeThread?.join(2500)
+        try {
+            writeThread?.join(2500)
+        } catch (_: Exception) {
+        }
         writeThread = null
         releaseWakeLock()
+        try {
+            outputPfd?.close()
+        } catch (_: Exception) {
+        }
+        outputPfd = null
         statusMessage = "stopped [${activeStrategy?.label ?: "none"}]"
-        val path = outputFile?.absolutePath
-        outputFile = null
-        return path
+        return statusMessage
     }
 
     private fun releaseAllRecords() {
-        try {
-            uplinkRecord?.apply { stop(); release() }
-            downlinkRecord?.apply { stop(); release() }
-            singleRecord?.apply { stop(); release() }
-        } catch (_: Exception) {
+        listOf(uplinkRecord, downlinkRecord, singleRecord).forEach { rec ->
+            try {
+                rec?.stop()
+            } catch (_: Exception) {
+            }
+            try {
+                rec?.release()
+            } catch (_: Exception) {
+            }
         }
         uplinkRecord = null
         downlinkRecord = null
@@ -382,7 +340,7 @@ class ShellRecorderUserService : IShellRecorder.Stub {
                 acquire(60 * 60 * 1000L)
             }
         } catch (e: Exception) {
-            Log.w(TAG, "WakeLock failed", e)
+            Log.w(TAG, "wakelock ${e.message}")
         }
     }
 
@@ -403,8 +361,7 @@ class ShellRecorderUserService : IShellRecorder.Stub {
     @Throws(RemoteException::class)
     override fun getActiveStrategy(): String = activeStrategy?.label ?: ""
 
-    private fun writeWavHeader(out: FileOutputStream, dataSize: Long, sampleRate: Int, channels: Int, bits: Int) {
-        val byteRate = sampleRate * channels * bits / 8
+    private fun writeWavHeader(out: FileOutputStream, dataSize: Long) {
         val header = ByteBuffer.allocate(44).order(ByteOrder.LITTLE_ENDIAN)
         header.put("RIFF".toByteArray())
         header.putInt((36 + dataSize).toInt())
@@ -412,33 +369,37 @@ class ShellRecorderUserService : IShellRecorder.Stub {
         header.put("fmt ".toByteArray())
         header.putInt(16)
         header.putShort(1)
-        header.putShort(channels.toShort())
-        header.putInt(sampleRate)
-        header.putInt(byteRate)
-        header.putShort((channels * bits / 8).toShort())
-        header.putShort(bits.toShort())
+        header.putShort(1)
+        header.putInt(SAMPLE_RATE)
+        header.putInt(SAMPLE_RATE * 2)
+        header.putShort(2)
+        header.putShort(16)
         header.put("data".toByteArray())
         header.putInt(dataSize.toInt())
         out.write(header.array())
     }
 
-    private fun patchWavHeader(file: File, dataSize: Long) {
+    private fun patchHeader(out: FileOutputStream, dataSize: Long) {
         try {
-            RandomAccessFile(file, "rw").use { raf ->
-                raf.seek(4)
-                raf.writeInt(Integer.reverseBytes((36 + dataSize).toInt()))
-                raf.seek(40)
-                raf.writeInt(Integer.reverseBytes(dataSize.toInt()))
-            }
+            val ch = out.channel
+            val buf = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN)
+            ch.position(4)
+            buf.putInt((36 + dataSize).toInt())
+            buf.flip()
+            ch.write(buf)
+            buf.clear()
+            ch.position(40)
+            buf.putInt(dataSize.toInt())
+            buf.flip()
+            ch.write(buf)
+            ch.force(true)
         } catch (e: Exception) {
-            Log.w(TAG, "patchWavHeader", e)
+            Log.w(TAG, "patch ${e.message}")
         }
     }
 
     companion object {
         private const val TAG = "ShellRecorderUS"
-        private const val SILENCE_THRESHOLD = 25.0
-        /** Speech-optimized; ~2.75× smaller than 44.1 kHz WAV. */
         private const val SAMPLE_RATE = 16_000
     }
 }
