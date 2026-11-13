@@ -7,8 +7,9 @@ import com.solid.callrecorder.ui.MainActivity
 import java.io.File
 
 /**
- * Single intelligent entry for all capture backends.
- * Tries highest-quality path first, logs every decision, never plays a beep.
+ * Oplus and Shizuku first (true both-sides when privileged).
+ * Otherwise classic mic+call mix. Dual AudioRecord is last because it used to
+ * report success while writing silence and blocked the mic path.
  */
 class SmartCaptureEngine(private val context: Context) {
 
@@ -18,7 +19,6 @@ class SmartCaptureEngine(private val context: Context) {
     private val classic = CallRecorder(context)
 
     private var active: Backend = Backend.NONE
-    private var lastNumber: String? = null
 
     enum class Backend { NONE, OPLUS, SHIZUKU, DUAL, CLASSIC }
 
@@ -32,7 +32,6 @@ class SmartCaptureEngine(private val context: Context) {
         if (active != Backend.NONE) {
             return Result(false, active, "already recording")
         }
-        lastNumber = phoneNumber
 
         val offline = forceOffline || context.getSharedPreferences(MainActivity.PREFS, Context.MODE_PRIVATE)
             .getBoolean(MainActivity.KEY_OFFLINE_ONLY, false)
@@ -42,41 +41,29 @@ class SmartCaptureEngine(private val context: Context) {
         } catch (_: Exception) {
             AudioManager.MODE_NORMAL
         }
-        val voip = mode == AudioManager.MODE_IN_COMMUNICATION
-        Log.i(TAG, "start number=$phoneNumber offline=$offline voip=$voip audioMode=$mode")
+        Log.i(TAG, "start number=$phoneNumber offline=$offline audioMode=$mode")
 
-        // 1) OEM Oplus (best on ColorOS when class is callable)
-        if (oplus.isAvailable()) {
-            if (oplus.start(phoneNumber)) {
-                active = Backend.OPLUS
-                return Result(true, Backend.OPLUS, "OplusRecorder VOICE_CALL")
-            }
-            Log.w(TAG, "Oplus present but start failed")
+        if (oplus.isAvailable() && oplus.start(phoneNumber)) {
+            active = Backend.OPLUS
+            return Result(true, Backend.OPLUS, "Oplus")
         }
 
-        // 2) Shizuku privileged dual / VOICE_CALL
-        if (!offline && shizuku.isAvailable()) {
-            if (shizuku.start(phoneNumber)) {
-                active = Backend.SHIZUKU
-                val strat = shizuku.lastStrategyLabel() ?: "shell"
-                return Result(true, Backend.SHIZUKU, "Shizuku $strat")
-            }
-            Log.w(TAG, "Shizuku available but start failed")
+        if (!offline && shizuku.isAvailable() && shizuku.start(phoneNumber)) {
+            active = Backend.SHIZUKU
+            val strat = shizuku.lastStrategyLabel() ?: "shell"
+            return Result(true, Backend.SHIZUKU, "Shizuku $strat")
         }
 
-        // 3) In-process dual uplink/downlink or VOICE_CALL AudioRecord
-        if (dual.start(phoneNumber)) {
-            active = Backend.DUAL
-            return Result(true, Backend.DUAL, "AudioRecord dual/VOICE_CALL")
-        }
-
-        // 4) MediaRecorder classic ladder
         if (classic.start(phoneNumber)) {
             active = Backend.CLASSIC
-            return Result(true, Backend.CLASSIC, "MediaRecorder source=${classic.activeSource}")
+            return Result(true, Backend.CLASSIC, "Classic ${classic.activeLabel}")
         }
 
-        active = Backend.NONE
+        if (dual.start(phoneNumber)) {
+            active = Backend.DUAL
+            return Result(true, Backend.DUAL, "Dual fallback")
+        }
+
         return Result(false, Backend.NONE, "all backends failed")
     }
 
@@ -95,7 +82,7 @@ class SmartCaptureEngine(private val context: Context) {
             null
         }
         active = Backend.NONE
-        Log.i(TAG, "stop backend=$used file=${file?.name} bytes=${file?.length()}")
+        Log.i(TAG, "stop backend=$used bytes=${file?.length()}")
         return file to used
     }
 
