@@ -10,8 +10,8 @@ import android.util.Log
 import java.io.File
 
 /**
- * Classic path – prioritizes sources that can pick up call audio.
- * Writes to public Recordings/CallRecorder when possible.
+ * Classic MediaRecorder – VOICE_CALL (4) first, then fallbacks.
+ * Matches Oplus audit source priority for two-way when permitted.
  */
 class CallRecorder(private val context: Context) {
 
@@ -21,6 +21,8 @@ class CallRecorder(private val context: Context) {
     private var focusRequest: AudioFocusRequest? = null
     var isRecording = false
         private set
+    var activeSource: Int = -1
+        private set
 
     fun start(phoneNumber: String? = null): Boolean {
         if (isRecording) return false
@@ -28,19 +30,23 @@ class CallRecorder(private val context: Context) {
         audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
         requestFocus()
 
-        // Prefer call-related sources first (MIC alone is often silent on earpiece)
+        // Integer 4 = VOICE_CALL (audit). Prefer this, then communication, then mic.
         val sources = listOf(
-            MediaRecorder.AudioSource.VOICE_CALL,
-            MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+            MediaRecorder.AudioSource.VOICE_CALL,           // 4 – both sides if allowed
+            MediaRecorder.AudioSource.VOICE_COMMUNICATION, // VoIP / in-call path
             MediaRecorder.AudioSource.VOICE_RECOGNITION,
             MediaRecorder.AudioSource.MIC,
             MediaRecorder.AudioSource.CAMCORDER
         )
 
         for (source in sources) {
-            if (tryStart(source, phoneNumber)) {
+            // Try speech profile first (16 kHz like Oplus), then higher quality
+            if (tryStart(source, phoneNumber, speechProfile = true) ||
+                tryStart(source, phoneNumber, speechProfile = false)
+            ) {
                 isRecording = true
-                Log.i(TAG, "Recording source=$source → ${output?.displayName}")
+                activeSource = source
+                Log.i(TAG, "OK source=$source (${sourceName(source)}) → ${output?.displayName}")
                 return true
             }
             discardFailedOutput()
@@ -51,7 +57,7 @@ class CallRecorder(private val context: Context) {
         return false
     }
 
-    private fun tryStart(source: Int, phoneNumber: String?): Boolean {
+    private fun tryStart(source: Int, phoneNumber: String?, speechProfile: Boolean): Boolean {
         releaseRecorderOnly()
         return try {
             output = RecordingStorage.createOutput(context, "Call", phoneNumber, "m4a")
@@ -66,9 +72,14 @@ class CallRecorder(private val context: Context) {
             mr.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
             mr.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
             mr.setAudioChannels(1)
-            // 44.1 kHz + 96 kbps: clearer voice than 16 kHz when signal exists
-            mr.setAudioSamplingRate(44_100)
-            mr.setAudioEncodingBitRate(96_000)
+            if (speechProfile) {
+                // Closer to Oplus 16 kHz path – smaller, speech-focused
+                mr.setAudioSamplingRate(16_000)
+                mr.setAudioEncodingBitRate(64_000)
+            } else {
+                mr.setAudioSamplingRate(44_100)
+                mr.setAudioEncodingBitRate(96_000)
+            }
 
             when {
                 output?.pfd != null -> mr.setOutputFile(output!!.pfd!!.fileDescriptor)
@@ -80,7 +91,7 @@ class CallRecorder(private val context: Context) {
             mr.start()
             true
         } catch (e: Exception) {
-            Log.w(TAG, "source=$source failed: ${e.message}")
+            Log.w(TAG, "source=$source speech=$speechProfile: ${e.message}")
             releaseRecorderOnly()
             discardFailedOutput()
             false
@@ -105,14 +116,22 @@ class CallRecorder(private val context: Context) {
             val name = output?.displayName
             output = null
             abandonFocus()
-            Log.i(TAG, "Stopped name=$name path=${result?.absolutePath}")
-            // File may be null when using MediaStore only – still success
+            Log.i(TAG, "Stopped source=$activeSource name=$name")
             result ?: File(RecordingStorage.humanPath(context), name ?: "call.m4a")
         } catch (e: Exception) {
             Log.e(TAG, "Stop failed", e)
             release()
             null
         }
+    }
+
+    private fun sourceName(s: Int) = when (s) {
+        MediaRecorder.AudioSource.VOICE_CALL -> "VOICE_CALL"
+        MediaRecorder.AudioSource.VOICE_COMMUNICATION -> "VOICE_COMMUNICATION"
+        MediaRecorder.AudioSource.VOICE_RECOGNITION -> "VOICE_RECOGNITION"
+        MediaRecorder.AudioSource.MIC -> "MIC"
+        MediaRecorder.AudioSource.CAMCORDER -> "CAMCORDER"
+        else -> "$s"
     }
 
     private fun requestFocus() {
@@ -139,7 +158,7 @@ class CallRecorder(private val context: Context) {
                 )
             }
         } catch (e: Exception) {
-            Log.w(TAG, "audio focus: ${e.message}")
+            Log.w(TAG, "focus: ${e.message}")
         }
     }
 
@@ -161,9 +180,9 @@ class CallRecorder(private val context: Context) {
         try {
             output?.pfd?.close()
             output?.file?.delete()
-            if (output?.uri != null) {
+            output?.uri?.let {
                 try {
-                    context.contentResolver.delete(output!!.uri!!, null, null)
+                    context.contentResolver.delete(it, null, null)
                 } catch (_: Exception) {
                 }
             }
