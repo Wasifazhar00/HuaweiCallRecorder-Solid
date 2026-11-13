@@ -16,6 +16,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import com.solid.callrecorder.R
+import com.solid.callrecorder.data.RecordingRepository
 import com.solid.callrecorder.recorder.AutoRecordPolicy
 import com.solid.callrecorder.recorder.OplusRecorderBridge
 import com.solid.callrecorder.recorder.RecordingStorage
@@ -35,6 +36,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnShizuku: Button
     private lateinit var btnStart: Button
     private lateinit var btnStop: Button
+    private lateinit var btnHistory: Button
     private lateinit var chkOfflineOnly: CheckBox
     private lateinit var chkAuto: CheckBox
     private lateinit var chkStrangersOnly: CheckBox
@@ -56,6 +58,14 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
+        // Defaults inspired by Oplus/Google settings
+        if (!prefs.contains(KEY_RETENTION_DAYS)) {
+            prefs.edit()
+                .putInt(KEY_RETENTION_DAYS, 30)
+                .putInt(KEY_MAX_RECORDINGS, 200)
+                .apply()
+        }
+
         statusText = findViewById(R.id.statusText)
         checklistText = findViewById(R.id.checklistText)
         infoText = findViewById(R.id.infoText)
@@ -66,6 +76,7 @@ class MainActivity : AppCompatActivity() {
         btnShizuku = findViewById(R.id.btnShizuku)
         btnStart = findViewById(R.id.btnStart)
         btnStop = findViewById(R.id.btnStop)
+        btnHistory = findViewById(R.id.btnHistory)
         chkOfflineOnly = findViewById(R.id.chkOfflineOnly)
         chkAuto = findViewById(R.id.chkAuto)
         chkStrangersOnly = findViewById(R.id.chkStrangersOnly)
@@ -98,6 +109,9 @@ class MainActivity : AppCompatActivity() {
         btnBattery.setOnClickListener { openBatterySettings() }
         btnGetShizuku.setOnClickListener { openShizukuDownload() }
         btnOpenShizuku.setOnClickListener { openShizukuApp() }
+        btnHistory.setOnClickListener {
+            startActivity(Intent(this, HistoryActivity::class.java))
+        }
 
         btnShizuku.setOnClickListener {
             if (!ShizukuEnhancedRecorder.isShizukuInstalled(this)) {
@@ -135,6 +149,8 @@ class MainActivity : AppCompatActivity() {
             )
         }
 
+        RecordingRepository.applyRetention(this)
+
         if (!checkPermissions()) requestPermissions()
         else if (chkAuto.isChecked) CallMonitorService.start(this)
         updateUI()
@@ -166,9 +182,7 @@ class MainActivity : AppCompatActivity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             needed.add(Manifest.permission.POST_NOTIFICATIONS)
         }
-        if (chkStrangersOnly.isChecked) {
-            needed.add(Manifest.permission.READ_CONTACTS)
-        }
+        if (chkStrangersOnly.isChecked) needed.add(Manifest.permission.READ_CONTACTS)
         permissionLauncher.launch(needed.toTypedArray())
     }
 
@@ -249,8 +263,8 @@ class MainActivity : AppCompatActivity() {
             appendLine(mark(permsOk, "Permissions"))
             appendLine(mark(batteryOk, "Battery unrestricted"))
             appendLine(mark(auto, "Auto-record"))
-            appendLine(mark(strangers, "Strangers-only policy"))
-            appendLine(mark(oplus, "OplusRecorder class present"))
+            appendLine(mark(strangers, "Strangers-only"))
+            appendLine(mark(oplus, "OplusRecorder present"))
             if (!offline) {
                 appendLine(mark(installed, "Shizuku installed"))
                 appendLine(mark(running, "Shizuku running"))
@@ -259,7 +273,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         statusText.text = when {
-            permsOk && auto -> "Ready – ladder: Oplus → Shizuku → Classic"
+            permsOk && auto -> "Ready – full feature stack"
             else -> "Finish checklist"
         }
 
@@ -267,17 +281,15 @@ class MainActivity : AppCompatActivity() {
         btnGetShizuku.isEnabled = !offline
         btnOpenShizuku.isEnabled = !offline
 
+        val days = prefs.getInt(KEY_RETENTION_DAYS, 30)
+        val max = prefs.getInt(KEY_MAX_RECORDINGS, 200)
         infoText.text = """
             Folder: ${RecordingStorage.humanPath(this)}
-            (Music / Recordings / Call Recordings)
 
-            Capture order:
-            1. OplusRecorder (ColorOS, if allowed)
-            2. Shizuku both-sides (if authorized)
-            3. Classic VOICE_CALL → MIC
-
-            No beep from this app.
-            Strangers-only needs Contacts permission.
+            Ladder: Oplus → Shizuku → Google dual → Classic
+            History: list / play / share / delete
+            Retention: ${days}d · max $max files
+            No recording beep from this app
         """.trimIndent()
     }
 
@@ -286,5 +298,7 @@ class MainActivity : AppCompatActivity() {
         const val KEY_OFFLINE_ONLY = "offline_only"
         const val KEY_AUTO_RECORD = "auto_record"
         const val KEY_AUTO_MODE = "auto_mode"
+        const val KEY_RETENTION_DAYS = "retention_days"
+        const val KEY_MAX_RECORDINGS = "max_recordings"
     }
 }
