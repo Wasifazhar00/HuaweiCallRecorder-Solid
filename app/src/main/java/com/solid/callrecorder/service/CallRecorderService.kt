@@ -12,11 +12,13 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import com.solid.callrecorder.SolidApp
+import com.solid.callrecorder.data.RecordingRepository
 import com.solid.callrecorder.recorder.CallRecorder
 import com.solid.callrecorder.recorder.GoogleStyleDualCapture
 import com.solid.callrecorder.recorder.OplusRecorderBridge
 import com.solid.callrecorder.recorder.ShizukuEnhancedRecorder
 import com.solid.callrecorder.ui.MainActivity
+import java.io.File
 
 class CallRecorderService : Service() {
 
@@ -93,11 +95,19 @@ class CallRecorderService : Service() {
 
     private fun stopRecording() {
         isActive = false
-        when (backend) {
-            "oplus" -> oplusRecorder.stop()
-            "shizuku" -> enhancedRecorder.stop()
-            "google_dual" -> googleDual.stop()
-            else -> classicRecorder.stop()
+        val used = backend
+        val file: File? = try {
+            when (backend) {
+                "oplus" -> oplusRecorder.stop()
+                "shizuku" -> enhancedRecorder.stop()
+                "google_dual" -> googleDual.stop()
+                else -> classicRecorder.stop()
+            }
+        } catch (_: Exception) {
+            null
+        }
+        if (file != null) {
+            RecordingRepository.onRecordingFinished(this, file.absolutePath, currentNumber, used)
         }
         releaseWakeLock()
         backend = "none"
@@ -170,15 +180,9 @@ class CallRecorderService : Service() {
     override fun onDestroy() {
         if (isActive) {
             try {
-                when (backend) {
-                    "oplus" -> oplusRecorder.stop()
-                    "shizuku" -> enhancedRecorder.stop()
-                    "google_dual" -> googleDual.stop()
-                    else -> classicRecorder.stop()
-                }
+                stopRecording()
             } catch (_: Exception) {
             }
-            isActive = false
         }
         releaseWakeLock()
         enhancedRecorder.release()
