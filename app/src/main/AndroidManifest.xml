@@ -2,7 +2,6 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- Core -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
@@ -17,7 +16,6 @@
         android:maxSdkVersion="32" />
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
 
-    <!-- Google Dialer style (privileged ones only work if granted by system/shell) -->
     <uses-permission android:name="android.permission.CAPTURE_AUDIO_OUTPUT"
         tools:ignore="ProtectedPermissions" />
     <uses-permission android:name="android.permission.CAPTURE_VOICE_COMMUNICATION_OUTPUT"
@@ -31,7 +29,6 @@
     <uses-permission android:name="android.permission.CONTROL_INCALL_EXPERIENCE"
         tools:ignore="ProtectedPermissions" />
 
-    <!-- FGS -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
@@ -50,7 +47,6 @@
         android:theme="@style/Theme.SolidCallRecorder"
         android:requestLegacyExternalStorage="true">
 
-        <!-- Oplus Phone metadata flag used by InCallUI factory -->
         <meta-data
             android:name="support_mp3_callrecordings"
             android:value="true" />
@@ -64,6 +60,12 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <activity
+            android:name=".ui.HistoryActivity"
+            android:exported="false"
+            android:label="Call recordings"
+            android:parentActivityName=".ui.MainActivity" />
 
         <service
             android:name=".service.CallRecorderService"
@@ -98,6 +100,24 @@
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
+
+        <receiver
+            android:name=".service.RetentionReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
 
         <provider
             android:name="rikka.shizuku.ShizukuProvider"
