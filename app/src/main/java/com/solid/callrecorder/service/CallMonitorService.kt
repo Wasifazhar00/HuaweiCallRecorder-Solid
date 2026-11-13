@@ -18,6 +18,7 @@ import androidx.core.app.ServiceCompat
 import com.solid.callrecorder.SolidApp
 import com.solid.callrecorder.recorder.AutoRecordPolicy
 import com.solid.callrecorder.recorder.CallRecorder
+import com.solid.callrecorder.recorder.GoogleStyleDualCapture
 import com.solid.callrecorder.recorder.OplusRecorderBridge
 import com.solid.callrecorder.recorder.ShizukuEnhancedRecorder
 import com.solid.callrecorder.ui.MainActivity
@@ -26,7 +27,8 @@ import java.util.concurrent.Executor
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Ladder: policy check → Oplus → Shizuku → classic MediaRecorder
+ * Ladder: policy → Oplus → Shizuku → Google dual AudioRecord → classic
+ * No disclosure beep.
  */
 class CallMonitorService : Service() {
 
@@ -37,6 +39,7 @@ class CallMonitorService : Service() {
     private var classic: CallRecorder? = null
     private var oplus: OplusRecorderBridge? = null
     private var shizuku: ShizukuEnhancedRecorder? = null
+    private var googleDual: GoogleStyleDualCapture? = null
     private var backend: String = "none"
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -45,15 +48,12 @@ class CallMonitorService : Service() {
         classic = CallRecorder(this)
         oplus = OplusRecorderBridge(this)
         shizuku = ShizukuEnhancedRecorder(this)
+        googleDual = GoogleStyleDualCapture(this)
         if (!startAsForegroundSafe()) {
             stopSelf()
             return
         }
         registerCallCallback()
-        Log.i(
-            TAG,
-            "armed oplus=${oplus?.isAvailable()} shizuku=${shizuku?.isAvailable()}"
-        )
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -172,32 +172,28 @@ class CallMonitorService : Service() {
     private fun startRecordingNow(number: String?) {
         mainHandler.postDelayed({
             if (!inCall.get()) return@postDelayed
-
             if (!AutoRecordPolicy.shouldRecord(this, number)) {
-                Log.i(TAG, "Policy skipped number=$number")
                 updateNotif("Skipped by policy")
                 inCall.set(false)
-                mainHandler.postDelayed({
-                    updateNotif("Auto-record on – waiting for calls")
-                }, 2500)
+                mainHandler.postDelayed({ updateNotif("Auto-record on – waiting for calls") }, 2500)
                 return@postDelayed
             }
 
-            // 1) Oplus OEM
             if (oplus?.isAvailable() == true && oplus?.start(number) == true) {
                 backend = "oplus"
                 updateNotif("Recording (Oplus)")
                 return@postDelayed
             }
-
-            // 2) Shizuku enhanced (unless offline-only)
             if (!offlineOnly() && shizuku?.isAvailable() == true && shizuku?.start(number) == true) {
                 backend = "shizuku"
                 updateNotif("Recording (Shizuku)")
                 return@postDelayed
             }
-
-            // 3) Classic
+            if (googleDual?.start(number) == true) {
+                backend = "google_dual"
+                updateNotif("Recording (Dual)")
+                return@postDelayed
+            }
             backend = "classic"
             if (classic?.start(number) == true) {
                 updateNotif("Recording (Classic)")
@@ -215,6 +211,7 @@ class CallMonitorService : Service() {
             when (backend) {
                 "oplus" -> oplus?.stop()
                 "shizuku" -> shizuku?.stop()
+                "google_dual" -> googleDual?.stop()
                 "classic" -> classic?.stop()
                 else -> null
             }
@@ -224,9 +221,7 @@ class CallMonitorService : Service() {
         }
         backend = "none"
         updateNotif(if (file != null) "Saved ${file.name}" else "Auto-record on – waiting for calls")
-        mainHandler.postDelayed({
-            updateNotif("Auto-record on – waiting for calls")
-        }, 3500)
+        mainHandler.postDelayed({ updateNotif("Auto-record on – waiting for calls") }, 3500)
     }
 
     override fun onDestroy() {
@@ -235,6 +230,7 @@ class CallMonitorService : Service() {
                 when (backend) {
                     "oplus" -> oplus?.stop()
                     "shizuku" -> shizuku?.stop()
+                    "google_dual" -> googleDual?.stop()
                     "classic" -> classic?.stop()
                 }
             }
