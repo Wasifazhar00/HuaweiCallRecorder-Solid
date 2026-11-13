@@ -18,12 +18,8 @@ import androidx.core.app.ServiceCompat
 import com.solid.callrecorder.SolidApp
 import com.solid.callrecorder.data.RecordingRepository
 import com.solid.callrecorder.recorder.AutoRecordPolicy
-import com.solid.callrecorder.recorder.CallRecorder
-import com.solid.callrecorder.recorder.GoogleStyleDualCapture
-import com.solid.callrecorder.recorder.OplusRecorderBridge
-import com.solid.callrecorder.recorder.ShizukuEnhancedRecorder
+import com.solid.callrecorder.recorder.SmartCaptureEngine
 import com.solid.callrecorder.ui.MainActivity
-import java.io.File
 import java.util.concurrent.Executor
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -33,26 +29,21 @@ class CallMonitorService : Service() {
     private var callback: TelephonyCallback? = null
     private var legacyListener: PhoneStateListener? = null
     private val inCall = AtomicBoolean(false)
-    private var classic: CallRecorder? = null
-    private var oplus: OplusRecorderBridge? = null
-    private var shizuku: ShizukuEnhancedRecorder? = null
-    private var googleDual: GoogleStyleDualCapture? = null
-    private var backend: String = "none"
+    private var engine: SmartCaptureEngine? = null
     private var lastNumber: String? = null
+    private var lastBackend = SmartCaptureEngine.Backend.NONE
     private val mainHandler = Handler(Looper.getMainLooper())
 
     override fun onCreate() {
         super.onCreate()
-        classic = CallRecorder(this)
-        oplus = OplusRecorderBridge(this)
-        shizuku = ShizukuEnhancedRecorder(this)
-        googleDual = GoogleStyleDualCapture(this)
+        engine = SmartCaptureEngine(this)
         if (!startAsForegroundSafe()) {
             stopSelf()
             return
         }
         registerCallCallback()
         RecordingRepository.applyRetention(this)
+        Log.i(TAG, "Monitor armed")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -67,12 +58,8 @@ class CallMonitorService : Service() {
         getSharedPreferences(MainActivity.PREFS, MODE_PRIVATE)
             .getBoolean(MainActivity.KEY_AUTO_RECORD, true)
 
-    private fun offlineOnly(): Boolean =
-        getSharedPreferences(MainActivity.PREFS, MODE_PRIVATE)
-            .getBoolean(MainActivity.KEY_OFFLINE_ONLY, false)
-
     private fun startAsForegroundSafe(): Boolean {
-        val n = buildMonitorNotification("Auto-record on – waiting for calls")
+        val n = buildMonitorNotification("Listening for calls")
         val attempts = mutableListOf<Int>()
         if (Build.VERSION.SDK_INT >= 34) {
             attempts += ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
@@ -104,7 +91,7 @@ class CallMonitorService : Service() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
         return NotificationCompat.Builder(this, SolidApp.CHANNEL_MONITOR)
-            .setContentTitle("Call Recorder")
+            .setContentTitle("Solid Call Recorder")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_menu_call)
             .setContentIntent(pending)
@@ -173,81 +160,48 @@ class CallMonitorService : Service() {
         mainHandler.postDelayed({
             if (!inCall.get()) return@postDelayed
             if (!AutoRecordPolicy.shouldRecord(this, number)) {
-                updateNotif("Skipped by policy")
+                updateNotif("Skipped (policy)")
                 inCall.set(false)
-                mainHandler.postDelayed({ updateNotif("Auto-record on – waiting for calls") }, 2500)
+                mainHandler.postDelayed({ updateNotif("Listening for calls") }, 2500)
                 return@postDelayed
             }
-
-            if (oplus?.isAvailable() == true && oplus?.start(number) == true) {
-                backend = "oplus"
-                updateNotif("Recording (Oplus)")
-                return@postDelayed
-            }
-            if (!offlineOnly() && shizuku?.isAvailable() == true && shizuku?.start(number) == true) {
-                backend = "shizuku"
-                updateNotif("Recording (Shizuku)")
-                return@postDelayed
-            }
-            if (googleDual?.start(number) == true) {
-                backend = "google_dual"
-                updateNotif("Recording (Dual)")
-                return@postDelayed
-            }
-            backend = "classic"
-            if (classic?.start(number) == true) {
-                updateNotif("Recording (Classic)")
+            val result = engine?.start(number) ?: SmartCaptureEngine.Result(false, SmartCaptureEngine.Backend.NONE, "no engine")
+            if (result.ok) {
+                lastBackend = result.backend
+                updateNotif("Recording · ${result.detail}")
+                Log.i(TAG, "recording ${result.detail}")
             } else {
-                backend = "none"
-                updateNotif("Record start failed")
+                lastBackend = SmartCaptureEngine.Backend.NONE
+                updateNotif("Start failed")
                 inCall.set(false)
+                Log.e(TAG, "start failed: ${result.detail}")
             }
-        }, 1500)
+        }, 1200)
     }
 
     private fun stopRecordingNow() {
         mainHandler.removeCallbacksAndMessages(null)
-        val usedBackend = backend
-        val file: File? = try {
-            when (backend) {
-                "oplus" -> oplus?.stop()
-                "shizuku" -> shizuku?.stop()
-                "google_dual" -> googleDual?.stop()
-                "classic" -> classic?.stop()
-                else -> null
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "stop", e)
-            null
-        }
-        backend = "none"
+        val (file, backend) = engine?.stop() ?: (null to SmartCaptureEngine.Backend.NONE)
         if (file != null) {
-            RecordingRepository.onRecordingFinished(this, file.absolutePath, lastNumber, usedBackend)
+            RecordingRepository.onRecordingFinished(
+                this, file.absolutePath, lastNumber, backend.name.lowercase()
+            )
             updateNotif("Saved ${file.name}")
         } else {
-            updateNotif("Auto-record on – waiting for calls")
+            updateNotif("Listening for calls")
         }
         lastNumber = null
-        mainHandler.postDelayed({ updateNotif("Auto-record on – waiting for calls") }, 3500)
+        lastBackend = SmartCaptureEngine.Backend.NONE
+        mainHandler.postDelayed({ updateNotif("Listening for calls") }, 3500)
     }
 
     override fun onDestroy() {
         try {
-            if (inCall.get()) {
-                when (backend) {
-                    "oplus" -> oplus?.stop()
-                    "shizuku" -> shizuku?.stop()
-                    "google_dual" -> googleDual?.stop()
-                    "classic" -> classic?.stop()
-                }
-            }
+            if (inCall.get()) engine?.stop()
         } catch (_: Exception) {
         }
         inCall.set(false)
-        try {
-            shizuku?.release()
-        } catch (_: Exception) {
-        }
+        engine?.release()
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 callback?.let { telephonyManager?.unregisterTelephonyCallback(it) }
