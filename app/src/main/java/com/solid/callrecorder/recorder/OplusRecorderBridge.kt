@@ -1,18 +1,15 @@
 package com.solid.callrecorder.recorder
 
 import android.content.Context
+import android.media.MediaRecorder
 import android.util.Log
 import java.io.File
 
 /**
- * Best-effort bridge to ColorOS/Oplus system call recorder.
- *
- * From decompiled com.android.incallui (Oplus):
- *   - Class: com.oplus.media.OplusRecorder
- *   - Used only by privileged InCallUI – may be hidden from 3rd-party apps.
- *
- * If reflection works on the device, we get OEM both-sides quality.
- * Otherwise [isAvailable] is false and classic/Shizuku paths are used.
+ * Reflection bridge matching Oplus InCallUI audit:
+ *  - setAudioSource(4) = VOICE_CALL
+ *  - sample rate 16000
+ *  - vendor format/encoder when present, else MediaRecorder-like API
  */
 class OplusRecorderBridge(private val context: Context) {
 
@@ -40,17 +37,27 @@ class OplusRecorderBridge(private val context: Context) {
 
             val dir = RecordingStorage.publicRecordingsDir()
                 ?: RecordingStorage.safeAppDir(context)
-            val out = File(dir, RecordingStorage.newFileName("Oplus", phoneNumber, "m4a"))
+            // Audit: Oplus MP3 path uses .mp3; fall back name still fine
+            val out = File(dir, RecordingStorage.newFileName("Oplus", phoneNumber, "mp3"))
             outputFile = out
 
-            // Common MediaRecorder-like surface on OEM wrappers
-            invoke(instance, "setOutputFile", arrayOf(String::class.java), arrayOf(out.absolutePath))
-            invoke(instance, "prepare", emptyArray(), emptyArray())
-            invoke(instance, "start", emptyArray(), emptyArray())
-            Log.i(TAG, "OplusRecorder started → ${out.name}")
+            // Audio source 4 = VOICE_CALL (audit)
+            invokeQuiet(instance, "setAudioSource", MediaRecorder.AudioSource.VOICE_CALL)
+
+            // Vendor values from audit when accepted; ignore failures
+            invokeQuiet(instance, "setOutputFormat", 9)
+            invokeQuiet(instance, "setAudioEncoder", 6)
+            invokeQuiet(instance, "setAudioSamplingRate", 16_000)
+            invokeQuiet(instance, "setAudioEncodingBitRate", 24_000)
+            invokeQuiet(instance, "setAudioChannels", 1)
+
+            invokeQuiet(instance, "setOutputFile", out.absolutePath)
+            invoke(instance, "prepare")
+            invoke(instance, "start")
+            Log.i(TAG, "OplusRecorder started ${out.name}")
             true
         } catch (e: Throwable) {
-            Log.w(TAG, "OplusRecorder start failed (expected on non-Oplus / non-system): ${e.message}")
+            Log.w(TAG, "OplusRecorder start failed: ${e.message}")
             release()
             false
         }
@@ -59,15 +66,15 @@ class OplusRecorderBridge(private val context: Context) {
     fun stop(): File? {
         return try {
             recorder?.let {
-                invoke(it, "stop", emptyArray(), emptyArray())
-                invoke(it, "release", emptyArray(), emptyArray())
+                invokeQuiet(it, "stop")
+                invokeQuiet(it, "release")
             }
             val f = outputFile
             recorder = null
             outputFile = null
             f?.takeIf { it.exists() && it.length() > 0 }
         } catch (e: Throwable) {
-            Log.w(TAG, "OplusRecorder stop: ${e.message}")
+            Log.w(TAG, "stop: ${e.message}")
             release()
             null
         }
@@ -75,19 +82,34 @@ class OplusRecorderBridge(private val context: Context) {
 
     private fun release() {
         try {
-            recorder?.let { invoke(it, "release", emptyArray(), emptyArray()) }
+            recorder?.let { invokeQuiet(it, "release") }
         } catch (_: Throwable) {
         }
         recorder = null
         outputFile = null
     }
 
-    private fun invoke(target: Any, name: String, types: Array<Class<*>>, args: Array<Any?>) {
+    private fun invoke(target: Any, name: String, vararg args: Any?) {
+        val types = args.map {
+            when (it) {
+                is Int -> Int::class.javaPrimitiveType!!
+                is String -> String::class.java
+                else -> it?.javaClass ?: Any::class.java
+            }
+        }.toTypedArray()
         val m = target.javaClass.methods.firstOrNull {
-            it.name == name && it.parameterTypes.size == types.size
+            it.name == name && it.parameterTypes.size == args.size
         } ?: target.javaClass.getMethod(name, *types)
         m.isAccessible = true
         m.invoke(target, *args)
+    }
+
+    private fun invokeQuiet(target: Any, name: String, vararg args: Any?) {
+        try {
+            invoke(target, name, *args)
+        } catch (e: Throwable) {
+            Log.d(TAG, "$name skipped: ${e.message}")
+        }
     }
 
     companion object {
