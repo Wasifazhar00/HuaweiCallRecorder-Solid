@@ -13,6 +13,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import com.solid.callrecorder.SolidApp
 import com.solid.callrecorder.recorder.CallRecorder
+import com.solid.callrecorder.recorder.GoogleStyleDualCapture
 import com.solid.callrecorder.recorder.OplusRecorderBridge
 import com.solid.callrecorder.recorder.ShizukuEnhancedRecorder
 import com.solid.callrecorder.ui.MainActivity
@@ -22,6 +23,7 @@ class CallRecorderService : Service() {
     private lateinit var classicRecorder: CallRecorder
     private lateinit var enhancedRecorder: ShizukuEnhancedRecorder
     private lateinit var oplusRecorder: OplusRecorderBridge
+    private lateinit var googleDual: GoogleStyleDualCapture
     private var backend = "none"
     private var currentNumber: String? = null
     private var wakeLock: PowerManager.WakeLock? = null
@@ -32,6 +34,7 @@ class CallRecorderService : Service() {
         classicRecorder = CallRecorder(this)
         enhancedRecorder = ShizukuEnhancedRecorder(this)
         oplusRecorder = OplusRecorderBridge(this)
+        googleDual = GoogleStyleDualCapture(this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -62,16 +65,16 @@ class CallRecorderService : Service() {
 
         val started = when {
             oplusRecorder.isAvailable() && oplusRecorder.start(currentNumber) -> {
-                backend = "oplus"
-                true
+                backend = "oplus"; true
             }
             !offlineOnly && enhancedRecorder.isAvailable() && enhancedRecorder.start(currentNumber) -> {
-                backend = "shizuku"
-                true
+                backend = "shizuku"; true
+            }
+            googleDual.start(currentNumber) -> {
+                backend = "google_dual"; true
             }
             classicRecorder.start(currentNumber) -> {
-                backend = "classic"
-                true
+                backend = "classic"; true
             }
             else -> false
         }
@@ -90,13 +93,13 @@ class CallRecorderService : Service() {
 
     private fun stopRecording() {
         isActive = false
-        val file = when (backend) {
+        when (backend) {
             "oplus" -> oplusRecorder.stop()
             "shizuku" -> enhancedRecorder.stop()
+            "google_dual" -> googleDual.stop()
             else -> classicRecorder.stop()
         }
         releaseWakeLock()
-        Log.i(TAG, "Stopped ${file?.name} backend=$backend")
         backend = "none"
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
@@ -170,6 +173,7 @@ class CallRecorderService : Service() {
                 when (backend) {
                     "oplus" -> oplusRecorder.stop()
                     "shizuku" -> enhancedRecorder.stop()
+                    "google_dual" -> googleDual.stop()
                     else -> classicRecorder.stop()
                 }
             } catch (_: Exception) {
