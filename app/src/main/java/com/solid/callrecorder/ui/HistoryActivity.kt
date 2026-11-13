@@ -1,115 +1,128 @@
 package com.solid.callrecorder.ui
 
+import android.content.Intent
 import android.media.AudioAttributes
 import android.media.MediaPlayer
+import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.Gravity
 import android.widget.ArrayAdapter
+import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ListView
+import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
-import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.FileProvider
 import com.solid.callrecorder.recorder.RecordingStorage
 import java.io.File
 import java.io.FileInputStream
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 
+/** In-app player. Lists every saved recording and plays it on the media stream. */
 class HistoryActivity : AppCompatActivity() {
 
+    private lateinit var title: TextView
+    private lateinit var seek: SeekBar
+    private lateinit var play: Button
     private lateinit var listView: ListView
-    private lateinit var empty: TextView
     private var files: List<File> = emptyList()
     private var player: MediaPlayer? = null
+    private var current: File? = null
+    private val handler = Handler(Looper.getMainLooper())
+    private var userSeeking = false
+
+    private val tick = object : Runnable {
+        override fun run() {
+            val mp = player
+            if (mp != null && mp.isPlaying && !userSeeking) {
+                seek.max = mp.duration.coerceAtLeast(1)
+                seek.progress = mp.currentPosition
+            }
+            handler.postDelayed(this, 300)
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        title = "Recordings"
-
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             fitsSystemWindows = true
-            setPadding(0, 24, 0, 0)
+            setPadding(32, 48, 32, 32)
         }
-        val header = TextView(this).apply {
-            text = "Recordings"
-            textSize = 22f
-            setPadding(48, 48, 48, 16)
+        title = TextView(this).apply {
+            text = "Player"
+            textSize = 20f
         }
-        val hint = TextView(this).apply {
-            text = "Tap a file to play it on the media volume."
-            textSize = 13f
-            setPadding(48, 0, 48, 16)
-        }
-        listView = ListView(this).apply {
-            setPadding(24, 8, 24, 24)
-            dividerHeight = 2
-        }
-        empty = TextView(this).apply {
-            text = "No recordings yet.\nAnswer or place a call with auto-record on."
-            textSize = 16f
+        seek = SeekBar(this)
+        play = Button(this).apply { text = "Play" }
+        val external = Button(this).apply { text = "Open in system player" }
+        val empty = TextView(this).apply {
+            text = "No recordings yet."
             gravity = Gravity.CENTER
-            setPadding(48, 80, 48, 48)
+            setPadding(0, 24, 0, 24)
         }
-        root.addView(header)
-        root.addView(hint)
+        listView = ListView(this)
+        root.addView(title)
+        root.addView(seek)
+        root.addView(play)
+        root.addView(external)
+        root.addView(empty)
         root.addView(listView, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f
         ))
-        root.addView(empty)
         setContentView(root)
 
-        listView.setOnItemClickListener { _, _, pos, _ ->
-            val file = files.getOrNull(pos) ?: return@setOnItemClickListener
-            if (!file.exists()) {
-                Toast.makeText(this, "File is gone", Toast.LENGTH_SHORT).show()
-                reload()
-                return@setOnItemClickListener
+        play.setOnClickListener { toggle() }
+        external.setOnClickListener { openExternal() }
+        seek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(bar: SeekBar?, progress: Int, fromUser: Boolean) {
+                if (fromUser) player?.seekTo(progress)
             }
-            AlertDialog.Builder(this)
-                .setTitle(file.name)
-                .setMessage(formatSize(file.length()))
-                .setPositiveButton("Play") { _, _ -> play(file) }
-                .setNegativeButton("Close", null)
-                .show()
+            override fun onStartTrackingTouch(bar: SeekBar?) { userSeeking = true }
+            override fun onStopTrackingTouch(bar: SeekBar?) { userSeeking = false }
+        })
+        listView.setOnItemClickListener { _, _, pos, _ ->
+            files.getOrNull(pos)?.let { startFile(it) }
         }
-    }
 
-    override fun onResume() {
-        super.onResume()
         reload()
+        empty.visibility = if (files.isEmpty()) android.view.View.VISIBLE else android.view.View.GONE
+        intent.getStringExtra("play")?.let { path ->
+            val f = File(path)
+            if (f.exists()) startFile(f)
+        } ?: files.firstOrNull()?.let { startFile(it) }
+
+        handler.post(tick)
     }
 
     private fun reload() {
-        val dir = RecordingStorage.safeAppDir(this)
-        files = dir.listFiles { f ->
-            f.isFile && (f.name.endsWith(".m4a", true) ||
-                f.name.endsWith(".wav", true) ||
-                f.name.endsWith(".mp3", true))
-        }?.sortedByDescending { it.lastModified() } ?: emptyList()
+        files = RecordingStorage.listPlayable(this)
+        listView.adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, files.map { it.name })
+    }
 
-        val fmt = SimpleDateFormat("dd MMM yyyy, HH:mm", Locale.getDefault())
-        val labels = files.map { f ->
-            "${f.name}\n${fmt.format(Date(f.lastModified()))} · ${formatSize(f.length())}"
+    private fun toggle() {
+        val mp = player
+        if (mp == null) {
+            (current ?: files.firstOrNull())?.let { startFile(it) }
+            return
         }
-        listView.adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, labels)
-        val none = files.isEmpty()
-        empty.visibility = if (none) android.view.View.VISIBLE else android.view.View.GONE
-        listView.visibility = if (none) android.view.View.GONE else android.view.View.VISIBLE
+        if (mp.isPlaying) {
+            mp.pause()
+            play.text = "Play"
+        } else {
+            mp.start()
+            play.text = "Pause"
+        }
     }
 
-    private fun formatSize(bytes: Long): String {
-        if (bytes < 1024) return "$bytes B"
-        if (bytes < 1024 * 1024) return "${bytes / 1024} KB"
-        return String.format(Locale.US, "%.1f MB", bytes / 1024.0 / 1024.0)
-    }
-
-    private fun play(file: File) {
+    private fun startFile(file: File) {
         try {
             player?.release()
+            current = file
+            title.text = file.name
             val mp = MediaPlayer()
             mp.setAudioAttributes(
                 AudioAttributes.Builder()
@@ -117,19 +130,35 @@ class HistoryActivity : AppCompatActivity() {
                     .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
                     .build()
             )
-            FileInputStream(file).use { input ->
-                mp.setDataSource(input.fd)
-                mp.prepare()
+            FileInputStream(file).use { mp.setDataSource(it.fd) }
+            mp.setOnPreparedListener {
+                seek.max = it.duration.coerceAtLeast(1)
+                it.start()
+                play.text = "Pause"
             }
-            mp.start()
+            mp.setOnCompletionListener { play.text = "Play" }
+            mp.prepareAsync()
             player = mp
-            Toast.makeText(this, "Playing ${file.name}", Toast.LENGTH_SHORT).show()
         } catch (e: Exception) {
             Toast.makeText(this, "Cannot play: ${e.message}", Toast.LENGTH_LONG).show()
         }
     }
 
+    private fun openExternal() {
+        val file = current ?: files.firstOrNull() ?: return
+        try {
+            val uri: Uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
+            startActivity(Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, "audio/*")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            })
+        } catch (e: Exception) {
+            Toast.makeText(this, "No system player: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
     override fun onDestroy() {
+        handler.removeCallbacksAndMessages(null)
         player?.release()
         super.onDestroy()
     }
