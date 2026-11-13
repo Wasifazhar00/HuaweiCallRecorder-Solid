@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.os.IBinder
+import android.os.ParcelFileDescriptor
 import android.util.Log
 import com.solid.callrecorder.IShellRecorder
 import com.solid.callrecorder.shizuku.ShellRecorderUserService
@@ -18,6 +19,7 @@ class ShizukuEnhancedRecorder(private val context: Context) : EnhancedRecorder {
     private var service: IShellRecorder? = null
     private var bound = false
     private var currentOutput: File? = null
+    private var currentPfd: ParcelFileDescriptor? = null
     private var lastStrategy: String? = null
 
     private val userServiceArgs = Shizuku.UserServiceArgs(
@@ -26,7 +28,7 @@ class ShizukuEnhancedRecorder(private val context: Context) : EnhancedRecorder {
         .daemon(false)
         .processNameSuffix("shellrec")
         .debuggable(false)
-        .version(5)
+        .version(6)
 
     private val binderReceivedListener = Shizuku.OnBinderReceivedListener {
         Log.i(TAG, "Shizuku binder ready")
@@ -92,7 +94,7 @@ class ShizukuEnhancedRecorder(private val context: Context) : EnhancedRecorder {
         }
         return try {
             Shizuku.bindUserService(userServiceArgs, conn)
-            latch.await(3, TimeUnit.SECONDS) && bound
+            latch.await(4, TimeUnit.SECONDS) && bound
         } catch (e: Throwable) {
             Log.e(TAG, "bind", e)
             false
@@ -103,23 +105,35 @@ class ShizukuEnhancedRecorder(private val context: Context) : EnhancedRecorder {
         lastStrategy = null
         if (!isAvailable() || !ensureBound()) return false
 
-        val dir = RecordingStorage.publicRecordingsDir() ?: RecordingStorage.safeAppDir(context)
-        val name = RecordingStorage.newFileName("Call", phoneNumber, "wav")
+        val dir = RecordingStorage.safeAppDir(context)
+        val name = RecordingStorage.newFileName("Shizuku", phoneNumber, "wav")
         val out = File(dir, name)
-        currentOutput = out
-
         return try {
-            val started = service?.start(out.absolutePath, phoneNumber) == true
+            val pfd = ParcelFileDescriptor.open(
+                out,
+                ParcelFileDescriptor.MODE_READ_WRITE or
+                    ParcelFileDescriptor.MODE_CREATE or
+                    ParcelFileDescriptor.MODE_TRUNCATE
+            )
+            currentOutput = out
+            currentPfd = pfd
+            val started = service?.start(pfd, phoneNumber) == true
             if (started) {
                 lastStrategy = try {
                     service?.activeStrategy?.takeIf { it.isNotBlank() }
                 } catch (_: Exception) {
                     null
                 }
-            } else currentOutput = null
+            } else {
+                pfd.close()
+                currentPfd = null
+                out.delete()
+                currentOutput = null
+            }
             started
         } catch (e: Exception) {
             Log.e(TAG, "start", e)
+            currentOutput?.delete()
             currentOutput = null
             false
         }
@@ -127,10 +141,15 @@ class ShizukuEnhancedRecorder(private val context: Context) : EnhancedRecorder {
 
     override fun stop(): File? {
         return try {
-            val path = service?.stop()
-            val file = path?.let { File(it) } ?: currentOutput
+            service?.stop()
+            try {
+                currentPfd?.close()
+            } catch (_: Exception) {
+            }
+            currentPfd = null
+            val file = currentOutput
             currentOutput = null
-            file
+            file?.takeIf { it.exists() && it.length() > 44 }
         } catch (e: Exception) {
             Log.e(TAG, "stop", e)
             currentOutput.also { currentOutput = null }
