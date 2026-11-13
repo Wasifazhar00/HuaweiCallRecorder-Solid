@@ -9,13 +9,11 @@ import android.os.ParcelFileDescriptor
 import android.provider.MediaStore
 import android.util.Log
 import java.io.File
+import java.io.FileInputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-/**
- * Path aligned with Oplus InCallUI: Music/Recordings/Call Recordings
- */
 object RecordingStorage {
 
     private const val TAG = "RecordingStorage"
@@ -34,80 +32,68 @@ object RecordingStorage {
         return "${prefix}_${num}_$ts.$ext"
     }
 
-    fun publicRecordingsDir(): File? {
-        return try {
-            val music = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC)
-            val dir = File(music, "Recordings/Call Recordings")
-            if (!dir.exists()) dir.mkdirs()
-            if (dir.exists() && dir.canWrite()) dir else null
-        } catch (e: Exception) {
-            Log.w(TAG, "publicRecordingsDir: ${e.message}")
-            null
-        }
-    }
-
     fun safeAppDir(context: Context): File {
         val base = context.getExternalFilesDir(Environment.DIRECTORY_MUSIC) ?: context.filesDir
-        val dir = File(base, "Recordings/Call Recordings")
+        val dir = File(base, "Recordings")
         if (!dir.exists()) dir.mkdirs()
         return dir
     }
 
-    fun createOutput(context: Context, prefix: String, phoneNumber: String?, ext: String = "m4a"): OutputTarget {
-        val name = newFileName(prefix, phoneNumber, ext)
-        val mime = if (ext == "wav") "audio/wav" else "audio/mp4"
+    fun listPlayable(context: Context): List<File> {
+        return safeAppDir(context).listFiles { f ->
+            f.isFile && (f.name.endsWith(".m4a", true) || f.name.endsWith(".wav", true) || f.name.endsWith(".mp3", true))
+        }?.sortedByDescending { it.lastModified() } ?: emptyList()
+    }
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            try {
-                val values = ContentValues().apply {
-                    put(MediaStore.Audio.Media.DISPLAY_NAME, name)
-                    put(MediaStore.Audio.Media.MIME_TYPE, mime)
+    /** Copies a finished recording into the system music library so any player can open it. */
+    fun publishToLibrary(context: Context, file: File): Uri? {
+        if (!file.exists() || file.length() < 44) return null
+        return try {
+            val mime = when {
+                file.name.endsWith(".wav", true) -> "audio/wav"
+                file.name.endsWith(".mp3", true) -> "audio/mpeg"
+                else -> "audio/mp4"
+            }
+            val values = ContentValues().apply {
+                put(MediaStore.Audio.Media.DISPLAY_NAME, file.name)
+                put(MediaStore.Audio.Media.MIME_TYPE, mime)
+                put(MediaStore.Audio.Media.IS_MUSIC, 1)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     put(MediaStore.Audio.Media.RELATIVE_PATH, RELATIVE_DIR)
                     put(MediaStore.Audio.Media.IS_PENDING, 1)
                 }
-                val uri = context.contentResolver.insert(
-                    MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, values
-                )
-                if (uri != null) {
-                    val pfd = context.contentResolver.openFileDescriptor(uri, "w")
-                    if (pfd != null) {
-                        return OutputTarget(null, uri, pfd, name)
-                    }
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "MediaStore: ${e.message}")
             }
-        }
-
-        publicRecordingsDir()?.let { dir ->
-            return OutputTarget(File(dir, name), null, null, name)
-        }
-
-        return OutputTarget(File(safeAppDir(context), name), null, null, name)
-    }
-
-    fun finalizeOutput(context: Context, target: OutputTarget?) {
-        if (target == null) return
-        try {
-            target.pfd?.close()
-        } catch (_: Exception) {
-        }
-        if (target.uri != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            try {
+            val uri = context.contentResolver.insert(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, values)
+                ?: return null
+            context.contentResolver.openOutputStream(uri)?.use { out ->
+                FileInputStream(file).use { input -> input.copyTo(out) }
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 context.contentResolver.update(
-                    target.uri,
+                    uri,
                     ContentValues().apply { put(MediaStore.Audio.Media.IS_PENDING, 0) },
                     null,
                     null
                 )
-            } catch (_: Exception) {
             }
+            Log.i(TAG, "published ${file.name} -> $uri")
+            uri
+        } catch (e: Exception) {
+            Log.w(TAG, "publish ${e.message}")
+            null
         }
     }
 
-    fun humanPath(context: Context): String {
-        publicRecordingsDir()?.let { return it.absolutePath }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) return RELATIVE_DIR
-        return safeAppDir(context).absolutePath
+    fun humanPath(context: Context): String = safeAppDir(context).absolutePath
+
+    fun publicRecordingsDir(): File? = null
+
+    fun createOutput(context: Context, prefix: String, phoneNumber: String?, ext: String = "m4a"): OutputTarget {
+        val name = newFileName(prefix, phoneNumber, ext)
+        return OutputTarget(File(safeAppDir(context), name), null, null, name)
+    }
+
+    fun finalizeOutput(context: Context, target: OutputTarget?) {
+        target?.file?.let { publishToLibrary(context, it) }
     }
 }
