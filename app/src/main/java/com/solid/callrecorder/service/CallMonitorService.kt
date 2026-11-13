@@ -31,7 +31,8 @@ class CallMonitorService : Service() {
     private val inCall = AtomicBoolean(false)
     private var engine: SmartCaptureEngine? = null
     private var lastNumber: String? = null
-    private var lastBackend = SmartCaptureEngine.Backend.NONE
+    private var direction = "Out"
+    private var previousState = TelephonyManager.CALL_STATE_IDLE
     private val mainHandler = Handler(Looper.getMainLooper())
 
     override fun onCreate() {
@@ -43,7 +44,7 @@ class CallMonitorService : Service() {
         }
         registerCallCallback()
         RecordingRepository.applyRetention(this)
-        Log.i(TAG, "Monitor armed")
+        Log.i(TAG, "Monitor armed for in and out")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -59,7 +60,7 @@ class CallMonitorService : Service() {
             .getBoolean(MainActivity.KEY_AUTO_RECORD, true)
 
     private fun startAsForegroundSafe(): Boolean {
-        val n = buildMonitorNotification("Listening for calls")
+        val n = buildMonitorNotification("Listening for incoming and outgoing")
         val attempts = mutableListOf<Int>()
         if (Build.VERSION.SDK_INT >= 34) {
             attempts += ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
@@ -146,53 +147,63 @@ class CallMonitorService : Service() {
     private fun handleState(state: Int, number: String?) {
         if (!autoMasterOn()) return
         when (state) {
+            TelephonyManager.CALL_STATE_RINGING -> {
+                direction = "In"
+                if (!number.isNullOrBlank()) lastNumber = number
+                previousState = state
+            }
             TelephonyManager.CALL_STATE_OFFHOOK -> {
-                if (inCall.compareAndSet(false, true)) startRecordingNow(number)
+                // Ringing then off-hook = answered incoming. Idle then off-hook = outgoing.
+                if (previousState != TelephonyManager.CALL_STATE_RINGING) direction = "Out"
+                if (!number.isNullOrBlank()) lastNumber = number
+                previousState = state
+                if (inCall.compareAndSet(false, true)) startRecordingNow()
             }
             TelephonyManager.CALL_STATE_IDLE -> {
+                previousState = state
                 if (inCall.compareAndSet(true, false)) stopRecordingNow()
             }
         }
     }
 
-    private fun startRecordingNow(number: String?) {
-        lastNumber = number
+    private fun startRecordingNow() {
+        val tagged = "${direction}_${lastNumber ?: "unknown"}"
         mainHandler.postDelayed({
             if (!inCall.get()) return@postDelayed
-            if (!AutoRecordPolicy.shouldRecord(this, number)) {
+            if (!AutoRecordPolicy.shouldRecord(this, lastNumber)) {
                 updateNotif("Skipped (policy)")
                 inCall.set(false)
-                mainHandler.postDelayed({ updateNotif("Listening for calls") }, 2500)
+                mainHandler.postDelayed({ updateNotif("Listening for incoming and outgoing") }, 2500)
                 return@postDelayed
             }
-            val result = engine?.start(number) ?: SmartCaptureEngine.Result(false, SmartCaptureEngine.Backend.NONE, "no engine")
+            val result = engine?.start(tagged)
+                ?: SmartCaptureEngine.Result(false, SmartCaptureEngine.Backend.NONE, "no engine")
             if (result.ok) {
-                lastBackend = result.backend
-                updateNotif("Recording · ${result.detail}")
-                Log.i(TAG, "recording ${result.detail}")
+                updateNotif("$direction · ${result.detail}")
+                Log.i(TAG, "recording $direction ${result.detail}")
             } else {
-                lastBackend = SmartCaptureEngine.Backend.NONE
                 updateNotif("Start failed")
                 inCall.set(false)
                 Log.e(TAG, "start failed: ${result.detail}")
             }
-        }, 1200)
+        }, 900)
     }
 
     private fun stopRecordingNow() {
         mainHandler.removeCallbacksAndMessages(null)
         val (file, backend) = engine?.stop() ?: (null to SmartCaptureEngine.Backend.NONE)
-        if (file != null) {
+        if (file != null && file.exists() && file.length() > 1000) {
             RecordingRepository.onRecordingFinished(
-                this, file.absolutePath, lastNumber, backend.name.lowercase()
+                this, file.absolutePath, lastNumber, "${direction.lowercase()}-${backend.name.lowercase()}"
             )
             updateNotif("Saved ${file.name}")
         } else {
-            updateNotif("Listening for calls")
+            file?.delete()
+            updateNotif("Call ended — no audio captured")
         }
         lastNumber = null
-        lastBackend = SmartCaptureEngine.Backend.NONE
-        mainHandler.postDelayed({ updateNotif("Listening for calls") }, 3500)
+        direction = "Out"
+        mainHandler.postDelayed({ updateNotif("Listening for incoming and outgoing") }, 3500)
     }
 
     override fun onDestroy() {
