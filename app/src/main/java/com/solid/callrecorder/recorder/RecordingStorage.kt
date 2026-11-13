@@ -14,13 +14,12 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * Prefer public Recordings/CallRecorder (not Android/data).
- * Falls back to app files only if public write is blocked.
+ * Path aligned with Oplus InCallUI: Music/Recordings/Call Recordings
  */
 object RecordingStorage {
 
     private const val TAG = "RecordingStorage"
-    const val RELATIVE_DIR = "Recordings/CallRecorder"
+    const val RELATIVE_DIR = "Music/Recordings/Call Recordings"
 
     data class OutputTarget(
         val file: File?,
@@ -35,15 +34,10 @@ object RecordingStorage {
         return "${prefix}_${num}_$ts.$ext"
     }
 
-    /** Public Recordings dir when possible. */
     fun publicRecordingsDir(): File? {
         return try {
-            val base = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_RECORDINGS)
-            } else {
-                File(Environment.getExternalStorageDirectory(), "Recordings")
-            }
-            val dir = File(base, "CallRecorder")
+            val music = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC)
+            val dir = File(music, "Recordings/Call Recordings")
             if (!dir.exists()) dir.mkdirs()
             if (dir.exists() && dir.canWrite()) dir else null
         } catch (e: Exception) {
@@ -54,19 +48,15 @@ object RecordingStorage {
 
     fun safeAppDir(context: Context): File {
         val base = context.getExternalFilesDir(Environment.DIRECTORY_MUSIC) ?: context.filesDir
-        val dir = File(base, "CallRecorder")
+        val dir = File(base, "Recordings/Call Recordings")
         if (!dir.exists()) dir.mkdirs()
         return dir
     }
 
-    /**
-     * Create output for MediaRecorder: try MediaStore Recordings, then public File, then app dir.
-     */
     fun createOutput(context: Context, prefix: String, phoneNumber: String?, ext: String = "m4a"): OutputTarget {
         val name = newFileName(prefix, phoneNumber, ext)
         val mime = if (ext == "wav") "audio/wav" else "audio/mp4"
 
-        // 1) MediaStore → shows under Recordings / Music apps
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             try {
                 val values = ContentValues().apply {
@@ -81,26 +71,19 @@ object RecordingStorage {
                 if (uri != null) {
                     val pfd = context.contentResolver.openFileDescriptor(uri, "w")
                     if (pfd != null) {
-                        Log.i(TAG, "MediaStore output $RELATIVE_DIR/$name")
                         return OutputTarget(null, uri, pfd, name)
                     }
                 }
             } catch (e: Exception) {
-                Log.w(TAG, "MediaStore create failed: ${e.message}")
+                Log.w(TAG, "MediaStore: ${e.message}")
             }
         }
 
-        // 2) Public Recordings/CallRecorder
         publicRecordingsDir()?.let { dir ->
-            val f = File(dir, name)
-            Log.i(TAG, "Public file ${f.absolutePath}")
-            return OutputTarget(f, null, null, name)
+            return OutputTarget(File(dir, name), null, null, name)
         }
 
-        // 3) App fallback
-        val f = File(safeAppDir(context), name)
-        Log.i(TAG, "App fallback ${f.absolutePath}")
-        return OutputTarget(f, null, null, name)
+        return OutputTarget(File(safeAppDir(context), name), null, null, name)
     }
 
     fun finalizeOutput(context: Context, target: OutputTarget?) {
@@ -111,21 +94,20 @@ object RecordingStorage {
         }
         if (target.uri != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             try {
-                val values = ContentValues().apply {
-                    put(MediaStore.Audio.Media.IS_PENDING, 0)
-                }
-                context.contentResolver.update(target.uri, values, null, null)
-            } catch (e: Exception) {
-                Log.w(TAG, "finalize MediaStore: ${e.message}")
+                context.contentResolver.update(
+                    target.uri,
+                    ContentValues().apply { put(MediaStore.Audio.Media.IS_PENDING, 0) },
+                    null,
+                    null
+                )
+            } catch (_: Exception) {
             }
         }
     }
 
     fun humanPath(context: Context): String {
         publicRecordingsDir()?.let { return it.absolutePath }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            return "Recordings/CallRecorder (MediaStore)"
-        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) return RELATIVE_DIR
         return safeAppDir(context).absolutePath
     }
 }
