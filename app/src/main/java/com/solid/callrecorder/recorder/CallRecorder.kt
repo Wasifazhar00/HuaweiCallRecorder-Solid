@@ -1,209 +1,260 @@
 package com.solid.callrecorder.recorder
 
+import android.annotation.SuppressLint
 import android.content.Context
-import android.media.AudioAttributes
-import android.media.AudioFocusRequest
+import android.media.AudioFormat
 import android.media.AudioManager
+import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.os.Build
 import android.util.Log
 import java.io.File
+import java.io.FileOutputStream
+import java.io.RandomAccessFile
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.abs
+import kotlin.math.min
+import kotlin.math.sqrt
 
 /**
- * Classic MediaRecorder – VOICE_CALL (4) first, then fallbacks.
- * Matches Oplus audit source priority for two-way when permitted.
+ * Classic path for incoming and outgoing calls.
+ *
+ * Old bug: MediaRecorder VOICE_CALL often "started" but wrote silence, so MIC
+ * was never used. Audio-focus requests also ducked the call, so speakerphone
+ * still sounded empty.
+ *
+ * Now we open the mic and, when the device allows, a second call source, mix
+ * them, and apply gain. We do not take audio focus and we do not force speaker.
  */
 class CallRecorder(private val context: Context) {
 
-    private var mediaRecorder: MediaRecorder? = null
-    private var output: RecordingStorage.OutputTarget? = null
+    private var mic: AudioRecord? = null
+    private var call: AudioRecord? = null
+    private var thread: Thread? = null
+    private val running = AtomicBoolean(false)
+    private var outFile: File? = null
     private var audioManager: AudioManager? = null
-    private var focusRequest: AudioFocusRequest? = null
+    private var savedMode: Int? = null
+
     var isRecording = false
         private set
-    var activeSource: Int = -1
+    var activeSource: Int = MediaRecorder.AudioSource.MIC
+        private set
+    var activeLabel: String = "MIC"
         private set
 
     fun start(phoneNumber: String? = null): Boolean {
-        if (isRecording) return false
+        if (isRecording || running.get()) return false
+
+        val dir = RecordingStorage.publicRecordingsDir() ?: RecordingStorage.safeAppDir(context)
+        val prefix = phoneNumber?.substringBefore('_')?.takeIf {
+            it.equals("In", true) || it.equals("Out", true)
+        } ?: "Call"
+        val number = phoneNumber?.substringAfter('_', phoneNumber)
+        outFile = File(dir, RecordingStorage.newFileName(prefix, number, "wav"))
 
         audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        requestFocus()
+        prepareRoute()
 
-        // Integer 4 = VOICE_CALL (audit). Prefer this, then communication, then mic.
-        val sources = listOf(
-            MediaRecorder.AudioSource.VOICE_CALL,           // 4 – both sides if allowed
-            MediaRecorder.AudioSource.VOICE_COMMUNICATION, // VoIP / in-call path
-            MediaRecorder.AudioSource.VOICE_RECOGNITION,
-            MediaRecorder.AudioSource.MIC,
-            MediaRecorder.AudioSource.CAMCORDER
-        )
+        val rate = 16_000
+        val ch = AudioFormat.CHANNEL_IN_MONO
+        val enc = AudioFormat.ENCODING_PCM_16BIT
+        val buf = (AudioRecord.getMinBufferSize(rate, ch, enc).coerceAtLeast(2048) * 2)
 
-        for (source in sources) {
-            // Try speech profile first (16 kHz like Oplus), then higher quality
-            if (tryStart(source, phoneNumber, speechProfile = true) ||
-                tryStart(source, phoneNumber, speechProfile = false)
-            ) {
-                isRecording = true
-                activeSource = source
-                Log.i(TAG, "OK source=$source (${sourceName(source)}) → ${output?.displayName}")
-                return true
-            }
-            discardFailedOutput()
+        mic = open(MediaRecorder.AudioSource.MIC, rate, ch, enc, buf)
+            ?: open(MediaRecorder.AudioSource.VOICE_RECOGNITION, rate, ch, enc, buf)
+            ?: open(MediaRecorder.AudioSource.CAMCORDER, rate, ch, enc, buf)
+
+        if (mic == null) {
+            Log.e(TAG, "Mic failed to open")
+            restoreRoute()
+            return false
         }
 
-        abandonFocus()
-        Log.e(TAG, "All sources failed")
-        return false
-    }
+        // Second stream: real both-sides when the OS allows it. Silent if blocked.
+        call = open(MediaRecorder.AudioSource.VOICE_CALL, rate, ch, enc, buf)
+            ?: open(MediaRecorder.AudioSource.VOICE_COMMUNICATION, rate, ch, enc, buf)
 
-    private fun tryStart(source: Int, phoneNumber: String?, speechProfile: Boolean): Boolean {
-        releaseRecorderOnly()
+        activeSource = if (call != null) MediaRecorder.AudioSource.VOICE_CALL else MediaRecorder.AudioSource.MIC
+        activeLabel = if (call != null) "MIC+CALL" else "MIC"
+
         return try {
-            output = RecordingStorage.createOutput(context, "Call", phoneNumber, "m4a")
-            val mr = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                MediaRecorder(context)
-            } else {
-                @Suppress("DEPRECATION")
-                MediaRecorder()
-            }
-            mediaRecorder = mr
-            mr.setAudioSource(source)
-            mr.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
-            mr.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-            mr.setAudioChannels(1)
-            if (speechProfile) {
-                // Closer to Oplus 16 kHz path – smaller, speech-focused
-                mr.setAudioSamplingRate(16_000)
-                mr.setAudioEncodingBitRate(64_000)
-            } else {
-                mr.setAudioSamplingRate(44_100)
-                mr.setAudioEncodingBitRate(96_000)
-            }
-
-            when {
-                output?.pfd != null -> mr.setOutputFile(output!!.pfd!!.fileDescriptor)
-                output?.file != null -> mr.setOutputFile(output!!.file!!.absolutePath)
-                else -> return false
-            }
-
-            mr.prepare()
-            mr.start()
+            mic?.startRecording()
+            call?.startRecording()
+            running.set(true)
+            isRecording = true
+            startWriter(rate)
+            Log.i(TAG, "Classic started $activeLabel → ${outFile?.name}")
             true
         } catch (e: Exception) {
-            Log.w(TAG, "source=$source speech=$speechProfile: ${e.message}")
-            releaseRecorderOnly()
-            discardFailedOutput()
+            Log.e(TAG, "start", e)
+            stop()
             false
         }
     }
 
-    fun stop(): File? {
-        if (!isRecording) return null
-        isRecording = false
+    @SuppressLint("MissingPermission")
+    private fun open(source: Int, rate: Int, ch: Int, enc: Int, buf: Int): AudioRecord? {
         return try {
-            mediaRecorder?.apply {
-                try {
-                    stop()
-                } catch (e: Exception) {
-                    Log.w(TAG, "stop: ${e.message}")
-                }
-                release()
+            val rec = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                AudioRecord.Builder()
+                    .setAudioSource(source)
+                    .setAudioFormat(
+                        AudioFormat.Builder()
+                            .setEncoding(enc)
+                            .setSampleRate(rate)
+                            .setChannelMask(ch)
+                            .build()
+                    )
+                    .setBufferSizeInBytes(buf)
+                    .build()
+            } else {
+                @Suppress("DEPRECATION")
+                AudioRecord(source, rate, ch, enc, buf)
             }
-            mediaRecorder = null
-            RecordingStorage.finalizeOutput(context, output)
-            val result = output?.file
-            val name = output?.displayName
-            output = null
-            abandonFocus()
-            Log.i(TAG, "Stopped source=$activeSource name=$name")
-            result ?: File(RecordingStorage.humanPath(context), name ?: "call.m4a")
+            if (rec.state == AudioRecord.STATE_INITIALIZED) rec else {
+                rec.release()
+                null
+            }
         } catch (e: Exception) {
-            Log.e(TAG, "Stop failed", e)
-            release()
+            Log.w(TAG, "open source=$source ${e.message}")
             null
         }
     }
 
-    private fun sourceName(s: Int) = when (s) {
-        MediaRecorder.AudioSource.VOICE_CALL -> "VOICE_CALL"
-        MediaRecorder.AudioSource.VOICE_COMMUNICATION -> "VOICE_COMMUNICATION"
-        MediaRecorder.AudioSource.VOICE_RECOGNITION -> "VOICE_RECOGNITION"
-        MediaRecorder.AudioSource.MIC -> "MIC"
-        MediaRecorder.AudioSource.CAMCORDER -> "CAMCORDER"
-        else -> "$s"
-    }
-
-    private fun requestFocus() {
+    private fun prepareRoute() {
+        val am = audioManager ?: return
         try {
-            val am = audioManager ?: return
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                val req = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
-                    .setAudioAttributes(
-                        AudioAttributes.Builder()
-                            .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
-                            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                            .build()
-                    )
-                    .setAcceptsDelayedFocusGain(false)
-                    .build()
-                focusRequest = req
-                am.requestAudioFocus(req)
-            } else {
-                @Suppress("DEPRECATION")
-                am.requestAudioFocus(
-                    null,
-                    AudioManager.STREAM_VOICE_CALL,
-                    AudioManager.AUDIOFOCUS_GAIN_TRANSIENT
-                )
+            savedMode = am.mode
+            // Keep the call audible. Do not request audio focus (that ducks the far side).
+            // Do not force speakerphone.
+            if (am.mode == AudioManager.MODE_NORMAL) {
+                am.mode = AudioManager.MODE_IN_COMMUNICATION
             }
         } catch (e: Exception) {
-            Log.w(TAG, "focus: ${e.message}")
+            Log.w(TAG, "route ${e.message}")
         }
     }
 
-    private fun abandonFocus() {
+    private fun restoreRoute() {
         try {
-            val am = audioManager ?: return
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                focusRequest?.let { am.abandonAudioFocusRequest(it) }
-            } else {
-                @Suppress("DEPRECATION")
-                am.abandonAudioFocus(null)
-            }
+            savedMode?.let { audioManager?.mode = it }
         } catch (_: Exception) {
         }
-        focusRequest = null
+        savedMode = null
     }
 
-    private fun discardFailedOutput() {
-        try {
-            output?.pfd?.close()
-            output?.file?.delete()
-            output?.uri?.let {
-                try {
-                    context.contentResolver.delete(it, null, null)
-                } catch (_: Exception) {
+    private fun startWriter(rate: Int) {
+        val file = outFile ?: return
+        thread = Thread({
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO)
+            try {
+                FileOutputStream(file).use { fos ->
+                    writeHeader(fos, 0, rate)
+                    val micBuf = ShortArray(1024)
+                    val callBuf = ShortArray(1024)
+                    val out = ByteArray(2048)
+                    var total = 0L
+                    var peak = 0
+                    while (running.get()) {
+                        val nMic = mic?.read(micBuf, 0, micBuf.size) ?: 0
+                        val nCall = call?.read(callBuf, 0, callBuf.size) ?: 0
+                        val n = when {
+                            nMic > 0 && nCall > 0 -> min(nMic, nCall)
+                            nMic > 0 -> nMic
+                            else -> nCall
+                        }
+                        if (n <= 0) {
+                            if (n < 0) break
+                            continue
+                        }
+                        for (i in 0 until n) {
+                            val m = if (nMic > i) micBuf[i].toInt() else 0
+                            val c = if (nCall > i) callBuf[i].toInt() else 0
+                            // Mix, then lift quiet speaker bleed without clipping hard.
+                            var s = m + c
+                            if (abs(s) in 1..1800) s *= 4
+                            else if (abs(s) in 1..6000) s = (s * 2)
+                            s = s.coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
+                            if (abs(s) > peak) peak = abs(s)
+                            out[i * 2] = (s and 0xFF).toByte()
+                            out[i * 2 + 1] = ((s shr 8) and 0xFF).toByte()
+                        }
+                        fos.write(out, 0, n * 2)
+                        total += n * 2
+                    }
+                    patchHeader(file, total)
+                    Log.i(TAG, "wrote bytes=$total peak=$peak")
                 }
+            } catch (e: Exception) {
+                Log.e(TAG, "writer", e)
             }
-        } catch (_: Exception) {
-        }
-        output = null
+        }, "ClassicMixWriter").also { it.start() }
     }
 
-    private fun releaseRecorderOnly() {
-        try {
-            mediaRecorder?.release()
-        } catch (_: Exception) {
-        }
-        mediaRecorder = null
-    }
-
-    private fun release() {
-        releaseRecorderOnly()
-        discardFailedOutput()
-        abandonFocus()
+    fun stop(): File? {
+        if (!isRecording && !running.get()) return null
         isRecording = false
+        running.set(false)
+        try {
+            thread?.join(2500)
+        } catch (_: Exception) {
+        }
+        thread = null
+        releaseRec(mic)
+        releaseRec(call)
+        mic = null
+        call = null
+        restoreRoute()
+        val f = outFile
+        outFile = null
+        val ok = f != null && f.exists() && f.length() > 44
+        Log.i(TAG, "stop ok=$ok bytes=${f?.length()} label=$activeLabel")
+        return if (ok) f else null
+    }
+
+    private fun releaseRec(r: AudioRecord?) {
+        try {
+            r?.stop()
+        } catch (_: Exception) {
+        }
+        try {
+            r?.release()
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun writeHeader(out: FileOutputStream, dataSize: Long, rate: Int) {
+        val h = ByteBuffer.allocate(44).order(ByteOrder.LITTLE_ENDIAN)
+        h.put("RIFF".toByteArray())
+        h.putInt((36 + dataSize).toInt())
+        h.put("WAVE".toByteArray())
+        h.put("fmt ".toByteArray())
+        h.putInt(16)
+        h.putShort(1)
+        h.putShort(1)
+        h.putInt(rate)
+        h.putInt(rate * 2)
+        h.putShort(2)
+        h.putShort(16)
+        h.put("data".toByteArray())
+        h.putInt(dataSize.toInt())
+        out.write(h.array())
+    }
+
+    private fun patchHeader(file: File, dataSize: Long) {
+        try {
+            RandomAccessFile(file, "rw").use { raf ->
+                raf.seek(4)
+                raf.writeInt(Integer.reverseBytes((36 + dataSize).toInt()))
+                raf.seek(40)
+                raf.writeInt(Integer.reverseBytes(dataSize.toInt()))
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "header ${e.message}")
+        }
     }
 
     companion object {
