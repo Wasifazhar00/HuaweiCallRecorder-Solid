@@ -111,6 +111,13 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:text="Stop recording"
+            android:layout_marginBottom="4dp" />
+
+        <Button
+            android:id="@+id/btnHistory"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Recording history"
             android:layout_marginBottom="12dp" />
 
         <TextView
