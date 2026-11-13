@@ -5,22 +5,20 @@ import android.media.AudioManager
 import android.media.MediaRecorder
 import android.os.Build
 import android.util.Log
+import com.solid.callrecorder.ui.MainActivity
 import java.io.File
 
 /**
- * Offline classic recorder for incoming and outgoing calls.
- *
- * Uses one microphone recorder. A call-audio source that "starts" but stays
- * silent is not used. Speaker is enabled for the length of the recording so
- * the other person is in the microphone, then the previous route is restored.
- * Audio focus is not requested, because that was ducking the call to silence.
+ * Classic call capture.
+ * Does not change audio mode (that was muting the call).
+ * Does not request audio focus (that was ducking it).
+ * Optional speaker so the far side is in the microphone.
  */
 class CallRecorder(private val context: Context) {
 
     private var mediaRecorder: MediaRecorder? = null
     private var audioManager: AudioManager? = null
     private var outFile: File? = null
-    private var savedMode: Int? = null
     private var savedSpeaker: Boolean? = null
 
     var isRecording = false
@@ -32,6 +30,13 @@ class CallRecorder(private val context: Context) {
 
     fun start(phoneNumber: String? = null): Boolean {
         if (isRecording) return false
+        val prefs = context.getSharedPreferences(MainActivity.PREFS, Context.MODE_PRIVATE)
+        val useSpeaker = prefs.getBoolean(MainActivity.KEY_SPEAKER, true)
+        val source = if (prefs.getBoolean(MainActivity.KEY_VOICE_COMM, false)) {
+            MediaRecorder.AudioSource.VOICE_COMMUNICATION
+        } else {
+            MediaRecorder.AudioSource.MIC
+        }
 
         val dir = RecordingStorage.safeAppDir(context)
         val prefix = phoneNumber?.substringBefore('_')?.takeIf {
@@ -41,8 +46,20 @@ class CallRecorder(private val context: Context) {
         outFile = File(dir, RecordingStorage.newFileName(prefix, number, "m4a"))
 
         audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        routeForBothSides()
+        if (useSpeaker) speaker(true)
 
+        val started = startRecorder(source) || (source != MediaRecorder.AudioSource.MIC && startRecorder(MediaRecorder.AudioSource.MIC))
+        if (!started) {
+            speaker(false)
+            return false
+        }
+        isRecording = true
+        Log.i(TAG, "started $activeLabel speaker=$useSpeaker ${outFile?.name}")
+        return true
+    }
+
+    private fun startRecorder(source: Int): Boolean {
+        releaseRecorder()
         return try {
             val mr = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 MediaRecorder(context)
@@ -51,7 +68,7 @@ class CallRecorder(private val context: Context) {
                 MediaRecorder()
             }
             mediaRecorder = mr
-            mr.setAudioSource(MediaRecorder.AudioSource.MIC)
+            mr.setAudioSource(source)
             mr.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
             mr.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
             mr.setAudioChannels(1)
@@ -60,53 +77,45 @@ class CallRecorder(private val context: Context) {
             mr.setOutputFile(outFile!!.absolutePath)
             mr.prepare()
             mr.start()
-            isRecording = true
-            activeLabel = "MIC+speaker"
-            Log.i(TAG, "recording ${outFile?.absolutePath}")
+            activeSource = source
+            activeLabel = if (source == MediaRecorder.AudioSource.MIC) "MIC" else "VOICE_COMM"
             true
         } catch (e: Exception) {
-            Log.e(TAG, "start", e)
+            Log.w(TAG, "source $source ${e.message}")
             releaseRecorder()
-            restoreRoute()
             false
         }
     }
 
-    private fun routeForBothSides() {
+    private fun speaker(on: Boolean) {
         val am = audioManager ?: return
         try {
-            savedMode = am.mode
-            savedSpeaker = am.isSpeakerphoneOn
-            am.mode = AudioManager.MODE_IN_COMMUNICATION
-            @Suppress("DEPRECATION")
-            am.isSpeakerphoneOn = true
-        } catch (e: Exception) {
-            Log.w(TAG, "route ${e.message}")
-        }
-    }
-
-    private fun restoreRoute() {
-        val am = audioManager ?: return
-        try {
-            savedSpeaker?.let {
+            if (savedSpeaker == null) savedSpeaker = am.isSpeakerphoneOn
+            if (on) {
                 @Suppress("DEPRECATION")
-                am.isSpeakerphoneOn = it
+                am.isSpeakerphoneOn = true
+            } else {
+                savedSpeaker?.let {
+                    @Suppress("DEPRECATION")
+                    am.isSpeakerphoneOn = it
+                }
+                savedSpeaker = null
             }
-            savedMode?.let { am.mode = it }
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            Log.w(TAG, "speaker ${e.message}")
         }
-        savedSpeaker = null
-        savedMode = null
     }
 
     fun stop(): File? {
         if (!isRecording) return null
         isRecording = false
         releaseRecorder()
-        restoreRoute()
-        val f = outFile
+        speaker(false)
+        val file = outFile
         outFile = null
-        return f?.takeIf { it.exists() && it.length() > 500 }
+        if (file == null || !file.exists() || file.length() < 500) return null
+        RecordingStorage.publishToLibrary(context, file)
+        return file
     }
 
     private fun releaseRecorder() {
