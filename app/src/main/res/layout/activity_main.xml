@@ -1,8 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:fillViewport="true">
+    android:fillViewport="true"
+    android:background="@color/md_surface">
 
     <LinearLayout
         android:layout_width="match_parent"
@@ -14,117 +16,192 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:text="Solid Call Recorder"
-            android:textSize="18sp"
+            android:textSize="22sp"
             android:textStyle="bold"
+            android:textColor="@color/md_on_surface"
             android:layout_marginBottom="4dp" />
 
         <TextView
             android:id="@+id/statusText"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Checking setup…"
+            android:text="Checking…"
             android:textSize="14sp"
-            android:layout_marginBottom="12dp" />
+            android:textColor="@color/md_secondary"
+            android:layout_marginBottom="16dp" />
 
-        <TextView
+        <!-- Status card -->
+        <com.google.android.material.card.MaterialCardView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Setup checklist"
-            android:textStyle="bold"
-            android:textSize="15sp"
-            android:layout_marginBottom="6dp" />
+            android:layout_marginBottom="12dp"
+            app:cardBackgroundColor="@color/md_card"
+            app:cardCornerRadius="16dp"
+            app:cardElevation="2dp">
 
-        <TextView
-            android:id="@+id/checklistText"
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="16dp">
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="System status"
+                    android:textStyle="bold"
+                    android:textSize="15sp"
+                    android:layout_marginBottom="8dp" />
+
+                <TextView
+                    android:id="@+id/checklistText"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:textSize="13sp"
+                    android:lineSpacingExtra="4dp"
+                    android:fontFamily="monospace" />
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <!-- Setup -->
+        <com.google.android.material.card.MaterialCardView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:textSize="13sp"
-            android:lineSpacingExtra="4dp"
-            android:layout_marginBottom="10dp" />
+            android:layout_marginBottom="12dp"
+            app:cardBackgroundColor="@color/md_card"
+            app:cardCornerRadius="16dp"
+            app:cardElevation="2dp">
 
-        <Button
-            android:id="@+id/btnPerms"
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="16dp">
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Setup"
+                    android:textStyle="bold"
+                    android:textSize="15sp"
+                    android:layout_marginBottom="10dp" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnPerms"
+                    style="@style/Widget.Solid.Button"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Grant permissions"
+                    android:layout_marginBottom="6dp" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnBattery"
+                    style="@style/Widget.Solid.Button.Tonal"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Battery unrestricted"
+                    android:layout_marginBottom="6dp" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnGetShizuku"
+                    style="@style/Widget.Solid.Button.Outlined"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Get Shizuku-Next"
+                    android:layout_marginBottom="6dp" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnOpenShizuku"
+                    style="@style/Widget.Solid.Button.Outlined"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Open Shizuku"
+                    android:layout_marginBottom="6dp" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnShizuku"
+                    style="@style/Widget.Solid.Button.Outlined"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Authorize in Shizuku" />
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <!-- Options -->
+        <com.google.android.material.card.MaterialCardView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="1. Grant permissions"
-            android:layout_marginBottom="4dp" />
+            android:layout_marginBottom="12dp"
+            app:cardBackgroundColor="@color/md_card"
+            app:cardCornerRadius="16dp"
+            app:cardElevation="2dp">
 
-        <Button
-            android:id="@+id/btnBattery"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="2. Unrestricted battery"
-            android:layout_marginBottom="4dp" />
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="16dp">
 
-        <Button
-            android:id="@+id/btnGetShizuku"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="3. Get Shizuku-Next (optional)"
-            android:layout_marginBottom="4dp" />
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Recording options"
+                    android:textStyle="bold"
+                    android:textSize="15sp"
+                    android:layout_marginBottom="8dp" />
 
-        <Button
-            android:id="@+id/btnOpenShizuku"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="4. Open Shizuku-Next and start it"
-            android:layout_marginBottom="4dp" />
+                <com.google.android.material.checkbox.MaterialCheckBox
+                    android:id="@+id/chkAuto"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Auto-record calls"
+                    android:checked="true" />
 
-        <Button
-            android:id="@+id/btnShizuku"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="5. Authorize this app"
-            android:layout_marginBottom="12dp" />
+                <com.google.android.material.checkbox.MaterialCheckBox
+                    android:id="@+id/chkStrangersOnly"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Only strangers (not in contacts)" />
 
-        <CheckBox
-            android:id="@+id/chkAuto"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="Auto-record incoming and outgoing"
-            android:checked="true"
-            android:layout_marginBottom="4dp" />
+                <com.google.android.material.checkbox.MaterialCheckBox
+                    android:id="@+id/chkOfflineOnly"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Offline only (skip Shizuku)" />
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
 
-        <CheckBox
-            android:id="@+id/chkStrangersOnly"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="Only strangers (not in contacts)"
-            android:layout_marginBottom="4dp" />
-
-        <CheckBox
-            android:id="@+id/chkOfflineOnly"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="Offline only (no Shizuku)"
-            android:layout_marginBottom="12dp" />
-
-        <Button
+        <!-- Actions -->
+        <com.google.android.material.button.MaterialButton
             android:id="@+id/btnStart"
+            style="@style/Widget.Solid.Button"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
+            android:layout_height="56dp"
             android:text="Start manual recording"
-            android:layout_marginBottom="4dp" />
+            android:layout_marginBottom="8dp" />
 
-        <Button
+        <com.google.android.material.button.MaterialButton
             android:id="@+id/btnStop"
+            style="@style/Widget.Solid.Button.Tonal"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:text="Stop recording"
-            android:layout_marginBottom="4dp" />
+            android:layout_marginBottom="8dp" />
 
-        <Button
+        <com.google.android.material.button.MaterialButton
             android:id="@+id/btnHistory"
+            style="@style/Widget.Solid.Button.Outlined"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:text="Recording history"
-            android:layout_marginBottom="12dp" />
+            android:layout_marginBottom="16dp" />
 
         <TextView
             android:id="@+id/infoText"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:textSize="12sp"
+            android:textColor="@color/md_outline"
             android:lineSpacingExtra="3dp" />
     </LinearLayout>
 </ScrollView>
