@@ -17,29 +17,38 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import com.solid.callrecorder.SolidApp
 import com.solid.callrecorder.recorder.CallRecorder
+import com.solid.callrecorder.recorder.OplusRecorderBridge
 import com.solid.callrecorder.ui.MainActivity
+import java.io.File
 import java.util.concurrent.Executor
 import java.util.concurrent.atomic.AtomicBoolean
 
+/**
+ * Auto-record ladder (from system app study):
+ *  1) OplusRecorder (ColorOS InCallUI API, if class is present)
+ *  2) Classic MediaRecorder source ladder
+ */
 class CallMonitorService : Service() {
 
     private var telephonyManager: TelephonyManager? = null
     private var callback: TelephonyCallback? = null
     private var legacyListener: PhoneStateListener? = null
     private val inCall = AtomicBoolean(false)
-    private var recorder: CallRecorder? = null
+    private var classic: CallRecorder? = null
+    private var oplus: OplusRecorderBridge? = null
+    private var usingOplus = false
     private val mainHandler = Handler(Looper.getMainLooper())
 
     override fun onCreate() {
         super.onCreate()
-        recorder = CallRecorder(this)
+        classic = CallRecorder(this)
+        oplus = OplusRecorderBridge(this)
         if (!startAsForegroundSafe()) {
-            Log.e(TAG, "Could not enter foreground")
             stopSelf()
             return
         }
         registerCallCallback()
-        Log.i(TAG, "Monitor armed")
+        Log.i(TAG, "Monitor armed oplusAvailable=${oplus?.isAvailable()}")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -66,19 +75,16 @@ class CallMonitorService : Service() {
             try {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && type != 0) {
                     ServiceCompat.startForeground(this, NOTIF_ID, n, type)
-                } else {
-                    startForeground(NOTIF_ID, n)
-                }
+                } else startForeground(NOTIF_ID, n)
                 return true
             } catch (e: Exception) {
-                Log.w(TAG, "FGS type=$type fail: ${e.message}")
+                Log.w(TAG, "FGS $type: ${e.message}")
             }
         }
         return try {
             startForeground(NOTIF_ID, n)
             true
         } catch (e: Exception) {
-            Log.e(TAG, "FGS fail", e)
             false
         }
     }
@@ -135,11 +141,6 @@ class CallMonitorService : Service() {
             @Suppress("DEPRECATION")
             telephonyManager?.listen(listener, PhoneStateListener.LISTEN_CALL_STATE)
         }
-        try {
-            @Suppress("DEPRECATION")
-            handleState(telephonyManager?.callState ?: TelephonyManager.CALL_STATE_IDLE, null)
-        } catch (_: Exception) {
-        }
     }
 
     private fun mainExecutorCompat(): Executor {
@@ -149,7 +150,6 @@ class CallMonitorService : Service() {
 
     private fun handleState(state: Int, number: String?) {
         if (!autoEnabled()) return
-        Log.i(TAG, "callState=$state")
         when (state) {
             TelephonyManager.CALL_STATE_OFFHOOK -> {
                 if (inCall.compareAndSet(false, true)) startRecordingNow(number)
@@ -161,15 +161,20 @@ class CallMonitorService : Service() {
     }
 
     private fun startRecordingNow(number: String?) {
-        // Wait for call audio path to settle (fixes many silent files)
         mainHandler.postDelayed({
             if (!inCall.get()) return@postDelayed
-            val ok = try {
-                recorder?.start(number) == true
-            } catch (e: Exception) {
-                Log.e(TAG, "start", e)
-                false
+
+            // 1) OEM Oplus path (same family as system InCallUI)
+            if (oplus?.isAvailable() == true && oplus?.start(number) == true) {
+                usingOplus = true
+                updateNotif("Recording (Oplus)")
+                Log.i(TAG, "Using OplusRecorder")
+                return@postDelayed
             }
+
+            // 2) Classic MediaRecorder ladder
+            usingOplus = false
+            val ok = classic?.start(number) == true
             if (ok) {
                 updateNotif("Recording call…")
             } else {
@@ -181,16 +186,14 @@ class CallMonitorService : Service() {
 
     private fun stopRecordingNow() {
         mainHandler.removeCallbacksAndMessages(null)
-        val file = try {
-            recorder?.stop()
+        val file: File? = try {
+            if (usingOplus) oplus?.stop() else classic?.stop()
         } catch (e: Exception) {
             Log.e(TAG, "stop", e)
             null
         }
-        updateNotif(
-            if (file != null) "Saved ${file.name}"
-            else "Auto-record on – waiting for calls"
-        )
+        usingOplus = false
+        updateNotif(if (file != null) "Saved ${file.name}" else "Auto-record on – waiting for calls")
         mainHandler.postDelayed({
             updateNotif("Auto-record on – waiting for calls")
         }, 3500)
@@ -198,7 +201,9 @@ class CallMonitorService : Service() {
 
     override fun onDestroy() {
         try {
-            if (inCall.get()) recorder?.stop()
+            if (inCall.get()) {
+                if (usingOplus) oplus?.stop() else classic?.stop()
+            }
         } catch (_: Exception) {
         }
         inCall.set(false)
@@ -231,7 +236,7 @@ class CallMonitorService : Service() {
                     Intent(context, CallMonitorService::class.java).apply { action = ACTION_ENSURE }
                 )
             } catch (e: Exception) {
-                Log.e(TAG, "start monitor", e)
+                Log.e(TAG, "start", e)
             }
         }
 
