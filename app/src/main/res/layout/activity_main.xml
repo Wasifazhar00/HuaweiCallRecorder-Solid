@@ -81,15 +81,22 @@
             android:id="@+id/chkAuto"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Auto-record incoming and outgoing calls"
+            android:text="Auto-record incoming and outgoing"
             android:checked="true"
+            android:layout_marginBottom="4dp" />
+
+        <CheckBox
+            android:id="@+id/chkStrangersOnly"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Only strangers (not in contacts)"
             android:layout_marginBottom="4dp" />
 
         <CheckBox
             android:id="@+id/chkOfflineOnly"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Offline only (Classic, no Shizuku)"
+            android:text="Offline only (no Shizuku)"
             android:layout_marginBottom="12dp" />
 
         <Button
