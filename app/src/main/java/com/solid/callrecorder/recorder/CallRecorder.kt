@@ -8,12 +8,12 @@ import android.util.Log
 import java.io.File
 
 /**
- * Offline classic recorder.
- * One MediaRecorder only (a second call source was silencing the mic).
- * No audio-focus request (that ducked the call, including on speaker).
- * Files go to app storage so history can open them.
- * Speaker is turned on only when the OS will not give us call audio,
- * then restored when the recording stops.
+ * Offline classic recorder for incoming and outgoing calls.
+ *
+ * Uses one microphone recorder. A call-audio source that "starts" but stays
+ * silent is not used. Speaker is enabled for the length of the recording so
+ * the other person is in the microphone, then the previous route is restored.
+ * Audio focus is not requested, because that was ducking the call to silence.
  */
 class CallRecorder(private val context: Context) {
 
@@ -32,6 +32,7 @@ class CallRecorder(private val context: Context) {
 
     fun start(phoneNumber: String? = null): Boolean {
         if (isRecording) return false
+
         val dir = RecordingStorage.safeAppDir(context)
         val prefix = phoneNumber?.substringBefore('_')?.takeIf {
             it.equals("In", true) || it.equals("Out", true)
@@ -40,10 +41,7 @@ class CallRecorder(private val context: Context) {
         outFile = File(dir, RecordingStorage.newFileName(prefix, number, "m4a"))
 
         audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        val source = pickSource()
-        activeSource = source
-        activeLabel = labelOf(source)
-        prepareRoute(forceSpeaker = source == MediaRecorder.AudioSource.MIC)
+        routeForBothSides()
 
         return try {
             val mr = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -53,42 +51,6 @@ class CallRecorder(private val context: Context) {
                 MediaRecorder()
             }
             mediaRecorder = mr
-            mr.setAudioSource(source)
-            mr.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
-            mr.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-            mr.setAudioChannels(1)
-            mr.setAudioSamplingRate(44_100)
-            mr.setAudioEncodingBitRate(128_000)
-            mr.setOutputFile(outFile!!.absolutePath)
-            mr.prepare()
-            mr.start()
-            isRecording = true
-            Log.i(TAG, "classic $activeLabel speaker=${audioManager?.isSpeakerphoneOn} file=${outFile?.name}")
-            true
-        } catch (e: Exception) {
-            Log.e(TAG, "start ${labelOf(source)} failed: ${e.message}")
-            releaseRecorder()
-            if (source != MediaRecorder.AudioSource.MIC && startMicFallback()) {
-                true
-            } else {
-                restoreRoute()
-                false
-            }
-        }
-    }
-
-    private fun startMicFallback(): Boolean {
-        return try {
-            prepareRoute(forceSpeaker = true)
-            val mr = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                MediaRecorder(context)
-            } else {
-                @Suppress("DEPRECATION")
-                MediaRecorder()
-            }
-            mediaRecorder = mr
-            activeSource = MediaRecorder.AudioSource.MIC
-            activeLabel = "MIC"
             mr.setAudioSource(MediaRecorder.AudioSource.MIC)
             mr.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
             mr.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
@@ -99,88 +61,38 @@ class CallRecorder(private val context: Context) {
             mr.prepare()
             mr.start()
             isRecording = true
-            Log.i(TAG, "classic fallback MIC")
+            activeLabel = "MIC+speaker"
+            Log.i(TAG, "recording ${outFile?.absolutePath}")
             true
         } catch (e: Exception) {
-            Log.e(TAG, "mic fallback", e)
+            Log.e(TAG, "start", e)
             releaseRecorder()
+            restoreRoute()
             false
         }
     }
 
-    /**
-     * Prefer a source that already contains both sides.
-     * VOICE_CALL on a normal app usually throws, so we fall through to the mic.
-     */
-    private fun pickSource(): Int {
-        val candidates = intArrayOf(
-            MediaRecorder.AudioSource.VOICE_CALL,
-            MediaRecorder.AudioSource.VOICE_COMMUNICATION,
-            MediaRecorder.AudioSource.MIC
-        )
-        for (source in candidates) {
-            if (sourceOpens(source)) return source
-        }
-        return MediaRecorder.AudioSource.MIC
-    }
-
-    private fun sourceOpens(source: Int): Boolean {
-        var mr: MediaRecorder? = null
-        val probe = File(context.cacheDir, "probe_$source.m4a")
-        return try {
-            mr = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                MediaRecorder(context)
-            } else {
-                @Suppress("DEPRECATION")
-                MediaRecorder()
-            }
-            mr.setAudioSource(source)
-            mr.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
-            mr.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-            mr.setOutputFile(probe.absolutePath)
-            mr.prepare()
-            mr.start()
-            true
-        } catch (_: Exception) {
-            false
-        } finally {
-            try {
-                mr?.stop()
-            } catch (_: Exception) {
-            }
-            try {
-                mr?.release()
-            } catch (_: Exception) {
-            }
-            probe.delete()
-        }
-    }
-
-    private fun prepareRoute(forceSpeaker: Boolean) {
+    private fun routeForBothSides() {
         val am = audioManager ?: return
         try {
-            if (savedMode == null) savedMode = am.mode
-            if (savedSpeaker == null) savedSpeaker = am.isSpeakerphoneOn
-            if (am.mode == AudioManager.MODE_NORMAL) {
-                am.mode = AudioManager.MODE_IN_COMMUNICATION
-            }
-            if (forceSpeaker && !am.isSpeakerphoneOn) {
-                @Suppress("DEPRECATION")
-                am.isSpeakerphoneOn = true
-            }
+            savedMode = am.mode
+            savedSpeaker = am.isSpeakerphoneOn
+            am.mode = AudioManager.MODE_IN_COMMUNICATION
+            @Suppress("DEPRECATION")
+            am.isSpeakerphoneOn = true
         } catch (e: Exception) {
             Log.w(TAG, "route ${e.message}")
         }
     }
 
     private fun restoreRoute() {
-        val am = audioManager
+        val am = audioManager ?: return
         try {
             savedSpeaker?.let {
                 @Suppress("DEPRECATION")
-                am?.isSpeakerphoneOn = it
+                am.isSpeakerphoneOn = it
             }
-            savedMode?.let { am?.mode = it }
+            savedMode?.let { am.mode = it }
         } catch (_: Exception) {
         }
         savedSpeaker = null
@@ -207,12 +119,6 @@ class CallRecorder(private val context: Context) {
         } catch (_: Exception) {
         }
         mediaRecorder = null
-    }
-
-    private fun labelOf(source: Int) = when (source) {
-        MediaRecorder.AudioSource.VOICE_CALL -> "VOICE_CALL"
-        MediaRecorder.AudioSource.VOICE_COMMUNICATION -> "VOICE_COMM"
-        else -> "MIC"
     }
 
     companion object {
