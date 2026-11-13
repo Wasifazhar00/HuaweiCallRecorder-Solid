@@ -13,6 +13,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import com.solid.callrecorder.SolidApp
 import com.solid.callrecorder.recorder.CallRecorder
+import com.solid.callrecorder.recorder.OplusRecorderBridge
 import com.solid.callrecorder.recorder.ShizukuEnhancedRecorder
 import com.solid.callrecorder.ui.MainActivity
 
@@ -20,9 +21,9 @@ class CallRecorderService : Service() {
 
     private lateinit var classicRecorder: CallRecorder
     private lateinit var enhancedRecorder: ShizukuEnhancedRecorder
-    private var usingEnhanced = false
+    private lateinit var oplusRecorder: OplusRecorderBridge
+    private var backend = "none"
     private var currentNumber: String? = null
-    private var activeStrategyLabel: String? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var isActive = false
 
@@ -30,6 +31,7 @@ class CallRecorderService : Service() {
         super.onCreate()
         classicRecorder = CallRecorder(this)
         enhancedRecorder = ShizukuEnhancedRecorder(this)
+        oplusRecorder = OplusRecorderBridge(this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -58,28 +60,23 @@ class CallRecorderService : Service() {
     private fun startRecording(offlineOnly: Boolean) {
         promoteForeground("Recording")
 
-        val tryEnhanced = !offlineOnly && enhancedRecorder.isAvailable()
-        val started = if (tryEnhanced) {
-            usingEnhanced = true
-            Log.i(TAG, "Enhanced path")
-            enhancedRecorder.start(currentNumber).also {
-                if (it) activeStrategyLabel = enhancedRecorder.lastStrategyLabel()
+        val started = when {
+            oplusRecorder.isAvailable() && oplusRecorder.start(currentNumber) -> {
+                backend = "oplus"
+                true
             }
-        } else {
-            usingEnhanced = false
-            Log.i(TAG, if (offlineOnly) "Offline Classic" else "Classic (no Shizuku)")
-            classicRecorder.start(currentNumber)
+            !offlineOnly && enhancedRecorder.isAvailable() && enhancedRecorder.start(currentNumber) -> {
+                backend = "shizuku"
+                true
+            }
+            classicRecorder.start(currentNumber) -> {
+                backend = "classic"
+                true
+            }
+            else -> false
         }
 
-        if (!started && usingEnhanced) {
-            usingEnhanced = false
-            activeStrategyLabel = null
-            if (!classicRecorder.start(currentNumber)) {
-                stopForeground(STOP_FOREGROUND_REMOVE)
-                stopSelf()
-                return
-            }
-        } else if (!started) {
+        if (!started) {
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
             return
@@ -87,15 +84,20 @@ class CallRecorderService : Service() {
 
         isActive = true
         acquireWakeLock()
-        updateNotification("Recording")
+        updateNotification("Recording ($backend)")
+        Log.i(TAG, "Started backend=$backend")
     }
 
     private fun stopRecording() {
         isActive = false
-        val file = if (usingEnhanced) enhancedRecorder.stop() else classicRecorder.stop()
+        val file = when (backend) {
+            "oplus" -> oplusRecorder.stop()
+            "shizuku" -> enhancedRecorder.stop()
+            else -> classicRecorder.stop()
+        }
         releaseWakeLock()
-        Log.i(TAG, "Stopped ${file?.name} strategy=$activeStrategyLabel")
-        activeStrategyLabel = null
+        Log.i(TAG, "Stopped ${file?.name} backend=$backend")
+        backend = "none"
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -157,15 +159,21 @@ class CallRecorderService : Service() {
     private fun releaseWakeLock() {
         try {
             wakeLock?.let { if (it.isHeld) it.release() }
-        } catch (_: Exception) {}
+        } catch (_: Exception) {
+        }
         wakeLock = null
     }
 
     override fun onDestroy() {
         if (isActive) {
             try {
-                if (usingEnhanced) enhancedRecorder.stop() else classicRecorder.stop()
-            } catch (_: Exception) {}
+                when (backend) {
+                    "oplus" -> oplusRecorder.stop()
+                    "shizuku" -> enhancedRecorder.stop()
+                    else -> classicRecorder.stop()
+                }
+            } catch (_: Exception) {
+            }
             isActive = false
         }
         releaseWakeLock()
