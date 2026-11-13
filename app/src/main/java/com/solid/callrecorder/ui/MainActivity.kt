@@ -16,6 +16,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import com.solid.callrecorder.R
+import com.solid.callrecorder.recorder.AutoRecordPolicy
+import com.solid.callrecorder.recorder.OplusRecorderBridge
 import com.solid.callrecorder.recorder.RecordingStorage
 import com.solid.callrecorder.recorder.ShizukuEnhancedRecorder
 import com.solid.callrecorder.service.CallMonitorService
@@ -35,6 +37,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnStop: Button
     private lateinit var chkOfflineOnly: CheckBox
     private lateinit var chkAuto: CheckBox
+    private lateinit var chkStrangersOnly: CheckBox
 
     private val prefs by lazy { getSharedPreferences(PREFS, MODE_PRIVATE) }
     private val enhanced by lazy { ShizukuEnhancedRecorder(this) }
@@ -42,8 +45,8 @@ class MainActivity : AppCompatActivity() {
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { results ->
-        if (results.values.all { it }) {
-            Toast.makeText(this, "Permissions OK", Toast.LENGTH_SHORT).show()
+        if (results.values.any { it }) {
+            Toast.makeText(this, "Permissions updated", Toast.LENGTH_SHORT).show()
             if (prefs.getBoolean(KEY_AUTO_RECORD, true)) CallMonitorService.start(this)
         }
         updateUI()
@@ -65,9 +68,12 @@ class MainActivity : AppCompatActivity() {
         btnStop = findViewById(R.id.btnStop)
         chkOfflineOnly = findViewById(R.id.chkOfflineOnly)
         chkAuto = findViewById(R.id.chkAuto)
+        chkStrangersOnly = findViewById(R.id.chkStrangersOnly)
 
         chkOfflineOnly.isChecked = prefs.getBoolean(KEY_OFFLINE_ONLY, false)
         chkAuto.isChecked = prefs.getBoolean(KEY_AUTO_RECORD, true)
+        chkStrangersOnly.isChecked =
+            prefs.getString(KEY_AUTO_MODE, AutoRecordPolicy.MODE_ALL) == AutoRecordPolicy.MODE_STRANGERS
 
         chkOfflineOnly.setOnCheckedChangeListener { _, c ->
             prefs.edit().putBoolean(KEY_OFFLINE_ONLY, c).apply()
@@ -77,6 +83,14 @@ class MainActivity : AppCompatActivity() {
             prefs.edit().putBoolean(KEY_AUTO_RECORD, c).apply()
             if (c && checkPermissions()) CallMonitorService.start(this)
             else CallMonitorService.stop(this)
+            updateUI()
+        }
+        chkStrangersOnly.setOnCheckedChangeListener { _, c ->
+            prefs.edit().putString(
+                KEY_AUTO_MODE,
+                if (c) AutoRecordPolicy.MODE_STRANGERS else AutoRecordPolicy.MODE_ALL
+            ).apply()
+            if (c) requestContactsIfNeeded()
             updateUI()
         }
 
@@ -152,7 +166,18 @@ class MainActivity : AppCompatActivity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             needed.add(Manifest.permission.POST_NOTIFICATIONS)
         }
+        if (chkStrangersOnly.isChecked) {
+            needed.add(Manifest.permission.READ_CONTACTS)
+        }
         permissionLauncher.launch(needed.toTypedArray())
+    }
+
+    private fun requestContactsIfNeeded() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_CONTACTS)
+            != PackageManager.PERMISSION_GRANTED
+        ) {
+            permissionLauncher.launch(arrayOf(Manifest.permission.READ_CONTACTS))
+        }
     }
 
     private fun isBatteryUnrestricted(): Boolean {
@@ -186,10 +211,7 @@ class MainActivity : AppCompatActivity() {
     private fun openShizukuDownload() {
         try {
             startActivity(
-                Intent(
-                    Intent.ACTION_VIEW,
-                    Uri.parse("https://github.com/thedjchi/Shizuku/releases")
-                )
+                Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/thedjchi/Shizuku/releases"))
             )
         } catch (_: Exception) {
         }
@@ -208,6 +230,8 @@ class MainActivity : AppCompatActivity() {
     private fun updateUI() {
         val offline = prefs.getBoolean(KEY_OFFLINE_ONLY, false)
         val auto = prefs.getBoolean(KEY_AUTO_RECORD, true)
+        val strangers = prefs.getString(KEY_AUTO_MODE, AutoRecordPolicy.MODE_ALL) ==
+            AutoRecordPolicy.MODE_STRANGERS
         val permsOk = checkPermissions()
         val batteryOk = isBatteryUnrestricted()
         val installed = ShizukuEnhancedRecorder.isShizukuInstalled(this)
@@ -217,6 +241,7 @@ class MainActivity : AppCompatActivity() {
         } catch (_: Throwable) {
             false
         }
+        val oplus = OplusRecorderBridge(this).isAvailable()
 
         fun mark(ok: Boolean, label: String) = (if (ok) "[OK] " else "[ ] ") + label
 
@@ -224,15 +249,17 @@ class MainActivity : AppCompatActivity() {
             appendLine(mark(permsOk, "Permissions"))
             appendLine(mark(batteryOk, "Battery unrestricted"))
             appendLine(mark(auto, "Auto-record"))
+            appendLine(mark(strangers, "Strangers-only policy"))
+            appendLine(mark(oplus, "OplusRecorder class present"))
             if (!offline) {
                 appendLine(mark(installed, "Shizuku installed"))
                 appendLine(mark(running, "Shizuku running"))
-                appendLine(mark(authorized, "Authorized"))
+                appendLine(mark(authorized, "Shizuku authorized"))
             }
         }
 
         statusText.text = when {
-            permsOk && auto -> "Ready – auto-record on"
+            permsOk && auto -> "Ready – ladder: Oplus → Shizuku → Classic"
             else -> "Finish checklist"
         }
 
@@ -241,15 +268,16 @@ class MainActivity : AppCompatActivity() {
         btnOpenShizuku.isEnabled = !offline
 
         infoText.text = """
-            Files folder:
-            ${RecordingStorage.humanPath(this)}
+            Folder: ${RecordingStorage.humanPath(this)}
+            (Music / Recordings / Call Recordings)
 
-            Look in: Internal storage → Recordings → CallRecorder
+            Capture order:
+            1. OplusRecorder (ColorOS, if allowed)
+            2. Shizuku both-sides (if authorized)
+            3. Classic VOICE_CALL → MIC
 
-            Format: M4A AAC 44.1 kHz 96 kbps (clearer speech)
-
-            Tip: speakerphone often improves offline capture.
-            Both-sides still best with Shizuku when available.
+            No beep from this app.
+            Strangers-only needs Contacts permission.
         """.trimIndent()
     }
 
@@ -257,5 +285,6 @@ class MainActivity : AppCompatActivity() {
         const val PREFS = "solid_prefs"
         const val KEY_OFFLINE_ONLY = "offline_only"
         const val KEY_AUTO_RECORD = "auto_record"
+        const val KEY_AUTO_MODE = "auto_mode"
     }
 }
