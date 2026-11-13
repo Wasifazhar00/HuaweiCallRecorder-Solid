@@ -13,30 +13,20 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import com.solid.callrecorder.SolidApp
 import com.solid.callrecorder.data.RecordingRepository
-import com.solid.callrecorder.recorder.CallRecorder
-import com.solid.callrecorder.recorder.GoogleStyleDualCapture
-import com.solid.callrecorder.recorder.OplusRecorderBridge
-import com.solid.callrecorder.recorder.ShizukuEnhancedRecorder
+import com.solid.callrecorder.recorder.SmartCaptureEngine
 import com.solid.callrecorder.ui.MainActivity
-import java.io.File
 
 class CallRecorderService : Service() {
 
-    private lateinit var classicRecorder: CallRecorder
-    private lateinit var enhancedRecorder: ShizukuEnhancedRecorder
-    private lateinit var oplusRecorder: OplusRecorderBridge
-    private lateinit var googleDual: GoogleStyleDualCapture
-    private var backend = "none"
+    private lateinit var engine: SmartCaptureEngine
     private var currentNumber: String? = null
+    private var lastBackend = SmartCaptureEngine.Backend.NONE
     private var wakeLock: PowerManager.WakeLock? = null
     private var isActive = false
 
     override fun onCreate() {
         super.onCreate()
-        classicRecorder = CallRecorder(this)
-        enhancedRecorder = ShizukuEnhancedRecorder(this)
-        oplusRecorder = OplusRecorderBridge(this)
-        googleDual = GoogleStyleDualCapture(this)
+        engine = SmartCaptureEngine(this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -63,54 +53,31 @@ class CallRecorderService : Service() {
             .getBoolean(MainActivity.KEY_OFFLINE_ONLY, false)
 
     private fun startRecording(offlineOnly: Boolean) {
-        promoteForeground("Recording")
-
-        val started = when {
-            oplusRecorder.isAvailable() && oplusRecorder.start(currentNumber) -> {
-                backend = "oplus"; true
-            }
-            !offlineOnly && enhancedRecorder.isAvailable() && enhancedRecorder.start(currentNumber) -> {
-                backend = "shizuku"; true
-            }
-            googleDual.start(currentNumber) -> {
-                backend = "google_dual"; true
-            }
-            classicRecorder.start(currentNumber) -> {
-                backend = "classic"; true
-            }
-            else -> false
-        }
-
-        if (!started) {
+        promoteForeground("Starting…")
+        val result = engine.start(currentNumber, forceOffline = offlineOnly)
+        if (!result.ok) {
+            Log.e(TAG, "start failed: ${result.detail}")
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
             return
         }
-
+        lastBackend = result.backend
         isActive = true
         acquireWakeLock()
-        updateNotification("Recording ($backend)")
-        Log.i(TAG, "Started backend=$backend")
+        updateNotification("Recording · ${result.detail}")
+        Log.i(TAG, "OK ${result.detail}")
     }
 
     private fun stopRecording() {
         isActive = false
-        val used = backend
-        val file: File? = try {
-            when (backend) {
-                "oplus" -> oplusRecorder.stop()
-                "shizuku" -> enhancedRecorder.stop()
-                "google_dual" -> googleDual.stop()
-                else -> classicRecorder.stop()
-            }
-        } catch (_: Exception) {
-            null
-        }
+        val (file, backend) = engine.stop()
         if (file != null) {
-            RecordingRepository.onRecordingFinished(this, file.absolutePath, currentNumber, used)
+            RecordingRepository.onRecordingFinished(
+                this, file.absolutePath, currentNumber, backend.name.lowercase()
+            )
         }
         releaseWakeLock()
-        backend = "none"
+        lastBackend = SmartCaptureEngine.Backend.NONE
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -139,7 +106,7 @@ class CallRecorderService : Service() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
         return NotificationCompat.Builder(this, SolidApp.CHANNEL_ID)
-            .setContentTitle("Call Recorder")
+            .setContentTitle("Solid Call Recorder")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setContentIntent(pending)
@@ -185,7 +152,7 @@ class CallRecorderService : Service() {
             }
         }
         releaseWakeLock()
-        enhancedRecorder.release()
+        engine.release()
         super.onDestroy()
     }
 
