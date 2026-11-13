@@ -16,17 +16,17 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import com.solid.callrecorder.SolidApp
+import com.solid.callrecorder.recorder.AutoRecordPolicy
 import com.solid.callrecorder.recorder.CallRecorder
 import com.solid.callrecorder.recorder.OplusRecorderBridge
+import com.solid.callrecorder.recorder.ShizukuEnhancedRecorder
 import com.solid.callrecorder.ui.MainActivity
 import java.io.File
 import java.util.concurrent.Executor
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Auto-record ladder (from system app study):
- *  1) OplusRecorder (ColorOS InCallUI API, if class is present)
- *  2) Classic MediaRecorder source ladder
+ * Ladder: policy check → Oplus → Shizuku → classic MediaRecorder
  */
 class CallMonitorService : Service() {
 
@@ -36,32 +36,41 @@ class CallMonitorService : Service() {
     private val inCall = AtomicBoolean(false)
     private var classic: CallRecorder? = null
     private var oplus: OplusRecorderBridge? = null
-    private var usingOplus = false
+    private var shizuku: ShizukuEnhancedRecorder? = null
+    private var backend: String = "none"
     private val mainHandler = Handler(Looper.getMainLooper())
 
     override fun onCreate() {
         super.onCreate()
         classic = CallRecorder(this)
         oplus = OplusRecorderBridge(this)
+        shizuku = ShizukuEnhancedRecorder(this)
         if (!startAsForegroundSafe()) {
             stopSelf()
             return
         }
         registerCallCallback()
-        Log.i(TAG, "Monitor armed oplusAvailable=${oplus?.isAvailable()}")
+        Log.i(
+            TAG,
+            "armed oplus=${oplus?.isAvailable()} shizuku=${shizuku?.isAvailable()}"
+        )
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (!autoEnabled()) {
+        if (!autoMasterOn()) {
             stopSelf()
             return START_NOT_STICKY
         }
         return START_STICKY
     }
 
-    private fun autoEnabled(): Boolean =
+    private fun autoMasterOn(): Boolean =
         getSharedPreferences(MainActivity.PREFS, MODE_PRIVATE)
             .getBoolean(MainActivity.KEY_AUTO_RECORD, true)
+
+    private fun offlineOnly(): Boolean =
+        getSharedPreferences(MainActivity.PREFS, MODE_PRIVATE)
+            .getBoolean(MainActivity.KEY_OFFLINE_ONLY, false)
 
     private fun startAsForegroundSafe(): Boolean {
         val n = buildMonitorNotification("Auto-record on – waiting for calls")
@@ -84,7 +93,7 @@ class CallMonitorService : Service() {
         return try {
             startForeground(NOTIF_ID, n)
             true
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             false
         }
     }
@@ -149,7 +158,7 @@ class CallMonitorService : Service() {
     }
 
     private fun handleState(state: Int, number: String?) {
-        if (!autoEnabled()) return
+        if (!autoMasterOn()) return
         when (state) {
             TelephonyManager.CALL_STATE_OFFHOOK -> {
                 if (inCall.compareAndSet(false, true)) startRecordingNow(number)
@@ -164,20 +173,36 @@ class CallMonitorService : Service() {
         mainHandler.postDelayed({
             if (!inCall.get()) return@postDelayed
 
-            // 1) OEM Oplus path (same family as system InCallUI)
-            if (oplus?.isAvailable() == true && oplus?.start(number) == true) {
-                usingOplus = true
-                updateNotif("Recording (Oplus)")
-                Log.i(TAG, "Using OplusRecorder")
+            if (!AutoRecordPolicy.shouldRecord(this, number)) {
+                Log.i(TAG, "Policy skipped number=$number")
+                updateNotif("Skipped by policy")
+                inCall.set(false)
+                mainHandler.postDelayed({
+                    updateNotif("Auto-record on – waiting for calls")
+                }, 2500)
                 return@postDelayed
             }
 
-            // 2) Classic MediaRecorder ladder
-            usingOplus = false
-            val ok = classic?.start(number) == true
-            if (ok) {
-                updateNotif("Recording call…")
+            // 1) Oplus OEM
+            if (oplus?.isAvailable() == true && oplus?.start(number) == true) {
+                backend = "oplus"
+                updateNotif("Recording (Oplus)")
+                return@postDelayed
+            }
+
+            // 2) Shizuku enhanced (unless offline-only)
+            if (!offlineOnly() && shizuku?.isAvailable() == true && shizuku?.start(number) == true) {
+                backend = "shizuku"
+                updateNotif("Recording (Shizuku)")
+                return@postDelayed
+            }
+
+            // 3) Classic
+            backend = "classic"
+            if (classic?.start(number) == true) {
+                updateNotif("Recording (Classic)")
             } else {
+                backend = "none"
                 updateNotif("Record start failed")
                 inCall.set(false)
             }
@@ -187,12 +212,17 @@ class CallMonitorService : Service() {
     private fun stopRecordingNow() {
         mainHandler.removeCallbacksAndMessages(null)
         val file: File? = try {
-            if (usingOplus) oplus?.stop() else classic?.stop()
+            when (backend) {
+                "oplus" -> oplus?.stop()
+                "shizuku" -> shizuku?.stop()
+                "classic" -> classic?.stop()
+                else -> null
+            }
         } catch (e: Exception) {
             Log.e(TAG, "stop", e)
             null
         }
-        usingOplus = false
+        backend = "none"
         updateNotif(if (file != null) "Saved ${file.name}" else "Auto-record on – waiting for calls")
         mainHandler.postDelayed({
             updateNotif("Auto-record on – waiting for calls")
@@ -202,11 +232,19 @@ class CallMonitorService : Service() {
     override fun onDestroy() {
         try {
             if (inCall.get()) {
-                if (usingOplus) oplus?.stop() else classic?.stop()
+                when (backend) {
+                    "oplus" -> oplus?.stop()
+                    "shizuku" -> shizuku?.stop()
+                    "classic" -> classic?.stop()
+                }
             }
         } catch (_: Exception) {
         }
         inCall.set(false)
+        try {
+            shizuku?.release()
+        } catch (_: Exception) {
+        }
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 callback?.let { telephonyManager?.unregisterTelephonyCallback(it) }
